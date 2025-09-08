@@ -1,0 +1,30 @@
+# Secrets
+token.json
+credentials.json
+
+# Folders
+downloaded_videos
+EditedVideos
+
+# Env
+.venv
+.env
+
+# videos & Audios
+*.wav
+*.mp4
+*.mp3
+
+# files
+*.txt
+*.xlsx
+
+# images
+*.png
+*.jpg
+
+# Logs
+*.json
+
+# Cache
+__pycache__/
