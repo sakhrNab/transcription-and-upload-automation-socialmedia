@@ -73,6 +73,18 @@ The script will:
 - append a row to the Excel workbook at `EXCEL_FILE_PATH` (created if missing);
 - upload the final workbook to Google Drive.
 
+## Thumbnail uploader
+
+A companion script `upload-thumbnails-to-google.py` uploads images from the thumbnails folder to a specified Google Drive folder and tracks uploads in `state-thumbnails.json`.
+
+Usage:
+
+```powershell
+python .\upload-thumbnails-to-google.py
+```
+
+You may set `THUMBNAILS_DIR`, `THUMBNAILS_STATE_FILE`, and `THUMBNAILS_DRIVE_FOLDER_ID` in `.env` to customize behavior.
+
 ## Google OAuth / tokens
 - Place `credentials.json` (Google API client credentials) in the repo root.
 - On first run the script opens a local browser to complete OAuth and creates `token.json`.
