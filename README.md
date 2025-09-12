@@ -185,6 +185,9 @@ The system includes a comprehensive tracking system that monitors all content ac
 
 ### AIWaverider Drive Integration
 - **Dual Upload**: Content uploaded to both Google Drive and AIWaverider Drive
+- **Duplicate Prevention**: Automatically checks existing files before uploading to prevent duplicates
+- **Smart File Checking**: Uses `/api/files/list` endpoint to efficiently check existing files
+- **Chunked Upload Support**: Large files (>10MB) use chunked upload for better reliability
 - **Organized Structure**: 
   - Videos: `/videos/instagram/ai.uprise/`
   - Thumbnails: `/thumbnails/instagram/`
@@ -196,6 +199,16 @@ The system includes a comprehensive tracking system that monitors all content ac
 - **Thumbnail Tracking**: `state-thumbnails.json` tracks thumbnail upload status
 - **Master Backup**: `master_sheet_backup.json` backs up Google Sheets data
 - **Persistent State**: State files persist across runs for efficient processing
+
+### Efficiency Features
+- **Duplicate Prevention**: Skips files already uploaded to AIWaverider Drive
+- **Bulk File Checking**: Single API call to check all existing files instead of individual checks
+- **Incremental Processing**: Only processes new or changed content
+- **Smart Upload Logic**: 
+  - Files <10MB: Regular upload
+  - Files ≥10MB: Chunked upload for reliability
+- **State Persistence**: Avoids re-processing completed tasks
+- **Offline Mode**: Continues working with local backups when services are unavailable
 
 ## Google OAuth / tokens
 - Place `credentials.json` (Google API client credentials) in the repo root.
@@ -261,6 +274,24 @@ Enable detailed logging by setting `LOG_LEVEL=DEBUG` in `.env` file.
 - **Resource Management**: Optimized memory and CPU usage
 - **Network Optimization**: Efficient upload strategies
 - **Error Recovery**: Automatic retry mechanisms
+
+## Efficiency Optimizations
+
+### Current Optimizations
+- **Duplicate Prevention**: Prevents unnecessary uploads by checking existing files
+- **Bulk API Calls**: Single file list check instead of individual file checks
+- **Chunked Uploads**: Reliable uploads for large files with automatic retry
+- **State Persistence**: Avoids re-processing completed tasks
+- **Smart File Detection**: Only processes files that have been uploaded to Google Drive
+
+### Potential Future Improvements
+- **Parallel Processing**: Upload multiple files simultaneously (with rate limiting)
+- **Concurrent API Calls**: Run Google Drive and AIWaverider uploads in parallel
+- **Caching**: Cache file lists locally to reduce API calls
+- **Delta Processing**: Only check for changes since last run
+- **Batch Operations**: Group multiple operations into single API calls where possible
+- **Connection Pooling**: Reuse HTTP connections for better performance
+- **Progress Tracking**: Real-time progress indicators for long-running operations
 
 ## Optional Improvements
 - Add `--no-upload` to skip uploads for testing

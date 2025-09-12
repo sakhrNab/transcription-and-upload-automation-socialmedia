@@ -16,11 +16,19 @@ import re
 import asyncio
 import subprocess
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
 from processor_logger import processor_logger as logger
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
@@ -42,6 +50,25 @@ MASTER_SHEET_NAME = 'socialmedia_tracker'
 # AIWaverider Drive Configuration
 AIWAVERIDER_UPLOAD_URL = os.getenv('UPLOAD_FILE_AIWAVERIDER', 'https://drive-backend.aiwaverider.com/webhook/files/upload')
 AIWAVERIDER_TOKEN = os.getenv('AIWAVERIDER_DRIVE_TOKEN')
+CACHE_DURATION_HOURS = int(os.getenv('CACHE_DURATION_HOURS', '1'))
+
+# Global session for connection pooling
+_http_session = None
+
+def get_http_session():
+    """Get or create HTTP session with connection pooling and retry strategy"""
+    global _http_session
+    if _http_session is None:
+        _http_session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+        _http_session.mount("http://", adapter)
+        _http_session.mount("https://", adapter)
+    return _http_session
 
 # Status Constants
 STATUS_PENDING = 'PENDING'
@@ -553,6 +580,95 @@ class MasterSheetManager:
             logger.log_error(f"Error in update_content_status: {str(e)}")
             raise
 
+    def batch_update_content_status(self, content_list: List[Dict[str, Any]]):
+        """Batch update multiple content entries to the master sheet using values API"""
+        try:
+            if not content_list:
+                return
+                
+            # Always update local backup first
+            for content_info in content_list:
+                filename = content_info['filename']
+                self.local_data['rows'][filename] = content_info
+            
+            self._save_local_backup()
+            
+            if not self.service:
+                logger.log_step(f"Saved {len(content_list)} updates to local backup")
+                self.offline_updates.extend(content_list)
+                return
+                
+            # Try to update online sheet using values API (more reliable than batch update)
+            try:
+                # First, check existing entries
+                result = self.service.spreadsheets().values().get(
+                    spreadsheetId=MASTER_SHEET_ID,
+                    range=f'{MASTER_SHEET_NAME}!A1:B1000'
+                ).execute()
+                
+                values = result.get('values', [])
+                existing_filenames = {}
+                if values:
+                    for idx, row in enumerate(values[1:], start=2):
+                        if row and len(row) > 1:
+                            existing_filenames[row[1]] = idx
+                
+                # Prepare all rows for batch update
+                all_rows = []
+                next_row = len(values) + 1 if values else 2
+                
+                for content_info in content_list:
+                    filename = content_info['filename']
+                    
+                    # Determine row number
+                    if filename in existing_filenames:
+                        row_number = existing_filenames[filename]
+                    else:
+                        row_number = next_row
+                        next_row += 1
+                    
+                    # Prepare row data
+                    row_data = []
+                    for col in SHEET_COLUMNS:
+                        value = content_info.get(col, '')
+                        if col.startswith('upload_status_') and not value:
+                            value = STATUS_PENDING
+                        row_data.append(value)
+                    
+                    all_rows.append(row_data)
+                
+                # Use batch update with values API
+                if all_rows:
+                    # Get the range for all rows
+                    start_row = 2 if not values else len(values) + 1
+                    end_row = start_row + len(all_rows)
+                    range_name = f'{MASTER_SHEET_NAME}!A{start_row}:S{end_row}'
+                    
+                    # Update all rows at once
+                    body = {'values': all_rows}
+                    self.service.spreadsheets().values().update(
+                        spreadsheetId=MASTER_SHEET_ID,
+                        range=range_name,
+                        valueInputOption='USER_ENTERED',
+                        body=body
+                    ).execute()
+                    
+                    logger.log_step(f"Batch updated {len(content_list)} entries in Google Sheets")
+                
+            except Exception as e:
+                logger.log_error(f"Error batch updating online sheet: {str(e)}")
+                # Fallback to individual updates
+                logger.log_step("Falling back to individual updates...")
+                for content_info in content_list:
+                    try:
+                        self.update_content_status(content_info)
+                    except Exception as individual_error:
+                        logger.log_error(f"Error updating individual entry {content_info.get('filename', 'unknown')}: {str(individual_error)}")
+                
+        except Exception as e:
+            logger.log_error(f"Error in batch_update_content_status: {str(e)}")
+            raise
+
 async def run_full_rounded(urls_file: str):
     """Run the full-rounded script and wait for completion"""
     try:
@@ -788,8 +904,12 @@ def update_master_sheet(state_file: str, thumbnails_state_file: str):
     # Collect all tracking data for local saving
     all_tracking_data = []
     
-    # Process each video and its thumbnail
-    for video_path, video_info in video_state.items():
+    # Process each video and its thumbnail with progress tracking
+    video_items = list(video_state.items())
+    if TQDM_AVAILABLE and video_items:
+        video_items = tqdm(video_items, desc="Processing videos for sheet update", unit="video")
+    
+    for video_path, video_info in video_items:
         video_name = video_info['file_name']
         base_name = os.path.splitext(video_name)[0]
         
@@ -821,9 +941,14 @@ def update_master_sheet(state_file: str, thumbnails_state_file: str):
         
         # Add to tracking data for local saving
         all_tracking_data.append(content_info)
-        
-        # Update sheet
-        sheet_manager.update_content_status(content_info)
+    
+    # Batch update sheet with all content
+    if all_tracking_data:
+        logger.log_step(f"Batch updating master sheet with {len(all_tracking_data)} entries...")
+        sheet_manager.batch_update_content_status(all_tracking_data)
+        logger.log_step(f"Successfully batch updated master sheet with {len(all_tracking_data)} entries")
+    else:
+        logger.log_step("No content to update in master sheet")
     
     # Save tracking data locally
     save_tracking_data_locally(all_tracking_data)
@@ -902,8 +1027,36 @@ def check_file_exists_on_aiwaverider(filename: str, folder_path: str) -> bool:
         logger.log_error(f"Error checking file existence on AIWaverider Drive: {str(e)}")
         return False
 
+async def upload_to_aiwaverider_drive_async(file_path: str, folder_path: str, file_type: str = "video") -> bool:
+    """Async upload file to AIWaverider Drive with support for chunked uploads for large files"""
+    try:
+        if not AIWAVERIDER_TOKEN:
+            logger.log_error("AIWAVERIDER_DRIVE_TOKEN not found in environment variables")
+            return False
+            
+        if not os.path.exists(file_path):
+            logger.log_error(f"File not found: {file_path}")
+            return False
+        
+        # Check file size to determine upload method
+        file_size = os.path.getsize(file_path)
+        file_size_mb = file_size / (1024 * 1024)  # Convert to MB
+        
+        logger.log_step(f"File size: {file_size_mb:.2f} MB")
+        
+        if file_size_mb < 10:
+            # Use regular upload for files under 10MB
+            return await _upload_small_file_async(file_path, folder_path, file_type)
+        else:
+            # Use chunked upload for files 10MB and above
+            return await _upload_large_file_chunked_async(file_path, folder_path, file_type)
+                
+    except Exception as e:
+        logger.log_error(f"Error uploading {file_type} to AIWaverider Drive: {str(e)}")
+        return False
+
 def upload_to_aiwaverider_drive(file_path: str, folder_path: str, file_type: str = "video") -> bool:
-    """Upload file to AIWaverider Drive with support for chunked uploads for large files"""
+    """Upload file to AIWaverider Drive with support for chunked uploads for large files (sync version)"""
     try:
         if not AIWAVERIDER_TOKEN:
             logger.log_error("AIWAVERIDER_DRIVE_TOKEN not found in environment variables")
@@ -930,6 +1083,12 @@ def upload_to_aiwaverider_drive(file_path: str, folder_path: str, file_type: str
         logger.log_error(f"Error uploading {file_type} to AIWaverider Drive: {str(e)}")
         return False
 
+async def _upload_small_file_async(file_path: str, folder_path: str, file_type: str) -> bool:
+    """Async upload small files (< 10MB) using regular upload endpoint"""
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as executor:
+        return await loop.run_in_executor(executor, _upload_small_file, file_path, folder_path, file_type)
+
 def _upload_small_file(file_path: str, folder_path: str, file_type: str) -> bool:
     """Upload small files (< 10MB) using regular upload endpoint"""
     try:
@@ -949,8 +1108,9 @@ def _upload_small_file(file_path: str, folder_path: str, file_type: str) -> bool
             logger.log_step(f"Uploading small {file_type} to AIWaverider Drive: {os.path.basename(file_path)}")
             logger.log_step(f"Folder path: {folder_path}")
             
-            # Make the request
-            response = requests.post(
+            # Use connection pooling
+            session = get_http_session()
+            response = session.post(
                 AIWAVERIDER_UPLOAD_URL,
                 headers=headers,
                 files=files,
@@ -968,6 +1128,12 @@ def _upload_small_file(file_path: str, folder_path: str, file_type: str) -> bool
     except Exception as e:
         logger.log_error(f"Error uploading small {file_type} to AIWaverider Drive: {str(e)}")
         return False
+
+async def _upload_large_file_chunked_async(file_path: str, folder_path: str, file_type: str) -> bool:
+    """Async upload large files (>= 10MB) using chunked upload endpoint"""
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as executor:
+        return await loop.run_in_executor(executor, _upload_large_file_chunked, file_path, folder_path, file_type)
 
 def _upload_large_file_chunked(file_path: str, folder_path: str, file_type: str) -> bool:
     """Upload large files (>= 10MB) using chunked upload endpoint"""
@@ -1015,6 +1181,9 @@ def _upload_file_chunks(file_path: str, upload_id: str, chunk_size: int, total_c
         # Get the chunked upload URL
         chunked_upload_url = AIWAVERIDER_UPLOAD_URL.replace('/webhook/files/upload', '/webhook/files/upload-chunk')
         
+        # Use connection pooling
+        session = get_http_session()
+        
         with open(file_path, 'rb') as file:
             for chunk_number in range(1, total_chunks + 1):
                 # Read chunk data
@@ -1035,7 +1204,7 @@ def _upload_file_chunks(file_path: str, upload_id: str, chunk_size: int, total_c
                 }
                 
                 # Upload chunk
-                response = requests.post(
+                response = session.post(
                     chunked_upload_url,
                     headers=headers,
                     files=files,
@@ -1077,7 +1246,9 @@ def _complete_chunked_upload(upload_id: str, filename: str, total_chunks: int, f
         logger.log_step(f"Completing chunked upload for: {filename}")
         logger.log_step(f"Request data: {chunked_upload_data}")
         
-        response = requests.post(
+        # Use connection pooling
+        session = get_http_session()
+        response = session.post(
             chunked_upload_url,
             headers=headers,
             json=chunked_upload_data,
@@ -1096,8 +1267,36 @@ def _complete_chunked_upload(upload_id: str, filename: str, total_chunks: int, f
         logger.log_error(f"Error completing chunked upload: {str(e)}")
         return False
 
-def get_aiwaverider_file_list(folder_path: str) -> set:
-    """Get list of files from AIWaverider Drive for a specific folder"""
+def get_cached_file_list(folder_path: str) -> set:
+    """Get cached file list or fetch fresh data if cache is expired"""
+    cache_file = f"cache_{folder_path.replace('/', '_').replace('\\', '_')}.json"
+    
+    try:
+        if os.path.exists(cache_file):
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+                cache_age = time.time() - cache_data.get('timestamp', 0)
+                if cache_age < CACHE_DURATION_HOURS * 3600:
+                    logger.log_step(f"Using cached file list for {folder_path} (age: {cache_age/60:.1f} minutes)")
+                    return set(cache_data.get('files', []))
+    except Exception as e:
+        logger.log_step(f"Cache read error: {str(e)}, fetching fresh data")
+    
+    # Get fresh data
+    files = get_aiwaverider_file_list_fresh(folder_path)
+    
+    # Cache the result
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump({'files': list(files), 'timestamp': time.time()}, f)
+        logger.log_step(f"Cached file list for {folder_path}")
+    except Exception as e:
+        logger.log_step(f"Cache write error: {str(e)}")
+    
+    return files
+
+def get_aiwaverider_file_list_fresh(folder_path: str) -> set:
+    """Get fresh list of files from AIWaverider Drive for a specific folder"""
     try:
         if not AIWAVERIDER_TOKEN:
             logger.log_error("AIWAVERIDER_DRIVE_TOKEN not found in environment variables")
@@ -1114,10 +1313,11 @@ def get_aiwaverider_file_list(folder_path: str) -> set:
             'folder_path': folder_path
         }
         
-        logger.log_step(f"Getting file list from AIWaverider Drive for folder: {folder_path}")
+        logger.log_step(f"Getting fresh file list from AIWaverider Drive for folder: {folder_path}")
         
-        # Make the request
-        response = requests.get(
+        # Use connection pooling
+        session = get_http_session()
+        response = session.get(
             list_url,
             headers=headers,
             params=params,
@@ -1131,7 +1331,6 @@ def get_aiwaverider_file_list(folder_path: str) -> set:
             # Extract filenames - the API returns 'name' field, not 'filename'
             filenames = {file_info.get('name') for file_info in files if file_info.get('name')}
             logger.log_step(f"Found {len(filenames)} files in AIWaverider Drive folder: {folder_path}")
-            logger.log_step(f"Existing files: {list(filenames)}")
             return filenames
         else:
             logger.log_error(f"Failed to get file list. Status: {response.status_code}, Response: {response.text}")
@@ -1141,12 +1340,24 @@ def get_aiwaverider_file_list(folder_path: str) -> set:
         logger.log_error(f"Error getting file list from AIWaverider Drive: {str(e)}")
         return set()
 
-def upload_video_to_aiwaverider(video_path: str) -> bool:
+def get_aiwaverider_file_list(folder_path: str) -> set:
+    """Get list of files from AIWaverider Drive for a specific folder (with caching)"""
+    return get_cached_file_list(folder_path)
+
+async def upload_video_to_aiwaverider(video_path: str) -> bool:
     """Upload video to AIWaverider Drive with /videos/instagram/ai.uprise path"""
+    return await upload_to_aiwaverider_drive_async(video_path, "/videos/instagram/ai.uprise", "video")
+
+async def upload_thumbnail_to_aiwaverider(thumbnail_path: str) -> bool:
+    """Upload thumbnail to AIWaverider Drive with /thumbnails/instagram path"""
+    return await upload_to_aiwaverider_drive_async(thumbnail_path, "/thumbnails/instagram", "thumbnail")
+
+def upload_video_to_aiwaverider_sync(video_path: str) -> bool:
+    """Synchronous wrapper for video upload"""
     return upload_to_aiwaverider_drive(video_path, "/videos/instagram/ai.uprise", "video")
 
-def upload_thumbnail_to_aiwaverider(thumbnail_path: str) -> bool:
-    """Upload thumbnail to AIWaverider Drive with /thumbnails/instagram path"""
+def upload_thumbnail_to_aiwaverider_sync(thumbnail_path: str) -> bool:
+    """Synchronous wrapper for thumbnail upload"""
     return upload_to_aiwaverider_drive(thumbnail_path, "/thumbnails/instagram", "thumbnail")
 
 async def upload_to_aiwaverider():
@@ -1190,15 +1401,10 @@ async def upload_to_aiwaverider():
                 else:
                     logger.log_step(f"Video file not found locally: {video_path}")
         
-        # Upload each video
-        for video_path in video_uploads:
-            if upload_video_to_aiwaverider(video_path):
-                logger.log_step(f"Successfully uploaded video: {os.path.basename(video_path)}")
-            else:
-                logger.log_error(f"Failed to upload video: {os.path.basename(video_path)}")
+        # Upload videos and thumbnails in parallel
+        logger.log_step("Uploading videos and thumbnails to AIWaverider Drive in parallel...")
         
-        # Upload thumbnails
-        logger.log_step("Uploading thumbnails to AIWaverider Drive...")
+        # Prepare thumbnail uploads
         thumbnail_uploads = []
         for thumb_path, thumb_info in thumb_state.items():
             # Check if thumbnail has been uploaded to Google Drive (has drive_id)
@@ -1214,12 +1420,72 @@ async def upload_to_aiwaverider():
                 else:
                     logger.log_step(f"Thumbnail file not found locally: {thumb_path}")
         
-        # Upload each thumbnail
+        # Create upload tasks
+        upload_tasks = []
+        
+        # Add video upload tasks
+        for video_path in video_uploads:
+            upload_tasks.append(('video', video_path))
+        
+        # Add thumbnail upload tasks
         for thumb_path in thumbnail_uploads:
-            if upload_thumbnail_to_aiwaverider(thumb_path):
-                logger.log_step(f"Successfully uploaded thumbnail: {os.path.basename(thumb_path)}")
-            else:
-                logger.log_error(f"Failed to upload thumbnail: {os.path.basename(thumb_path)}")
+            upload_tasks.append(('thumbnail', thumb_path))
+        
+        # Execute uploads in parallel with progress tracking
+        if upload_tasks:
+            logger.log_step(f"Starting parallel upload of {len(upload_tasks)} files...")
+            
+            # Create semaphore to limit concurrent uploads (max 3 at a time)
+            semaphore = asyncio.Semaphore(3)
+            
+            async def upload_with_semaphore(file_type: str, file_path: str, progress_callback=None):
+                async with semaphore:
+                    if progress_callback:
+                        progress_callback(f"Uploading {file_type}: {os.path.basename(file_path)}")
+                    if file_type == 'video':
+                        return await upload_video_to_aiwaverider(file_path)
+                    else:
+                        return await upload_thumbnail_to_aiwaverider(file_path)
+            
+            # Progress tracking
+            completed = 0
+            total = len(upload_tasks)
+            
+            def progress_callback(message):
+                nonlocal completed
+                completed += 1
+                if TQDM_AVAILABLE:
+                    logger.log_step(f"[{completed}/{total}] {message}")
+                else:
+                    logger.log_step(f"[{completed}/{total}] {message}")
+            
+            # Execute all uploads concurrently
+            results = await asyncio.gather(
+                *[upload_with_semaphore(file_type, file_path, progress_callback) for file_type, file_path in upload_tasks],
+                return_exceptions=True
+            )
+            
+            # Process results
+            successful_uploads = 0
+            failed_uploads = 0
+            
+            for i, (file_type, file_path) in enumerate(upload_tasks):
+                result = results[i]
+                filename = os.path.basename(file_path)
+                
+                if isinstance(result, Exception):
+                    logger.log_error(f"Failed to upload {file_type}: {filename} - {str(result)}")
+                    failed_uploads += 1
+                elif result:
+                    logger.log_step(f"Successfully uploaded {file_type}: {filename}")
+                    successful_uploads += 1
+                else:
+                    logger.log_error(f"Failed to upload {file_type}: {filename}")
+                    failed_uploads += 1
+            
+            logger.log_step(f"Upload completed: {successful_uploads} successful, {failed_uploads} failed")
+        else:
+            logger.log_step("No files to upload to AIWaverider Drive")
         
         logger.log_step("AIWaverider Drive uploads completed")
         return True
