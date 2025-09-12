@@ -11,19 +11,36 @@ A small Python utility that downloads a single video (TikTok/Instagram/etc.) via
 - Batch-mode: read multiple URLs from a text file (`--urls-file`).
 - Automatic handling: if an existing Excel file is invalid/corrupt, the script will move it aside and create a fresh workbook.
 
-## Files of interest
-- `transcribe-videos.py` — main script.
-- `requirements.txt` — Python dependencies (install into a venv).
-- `credentials.json` — Google API client credentials (you must create/download and place here).
-- `token.json` — OAuth token created after first OAuth flow (automatically refreshed/overwritten).
+## Core Scripts and Files
+- `full-rounded-url-download-transcription.py` — Main script for downloading and processing videos
+- `upload-new-video-to-google.py` — Continuous monitor for uploading MP4 files to Google Drive
+- `upload-thumbnails-to-google.py` — Handles thumbnail uploads to a specific Drive folder
+- `requirements.txt` — Python dependencies (install into a venv)
+- `credentials.json` — Google API client credentials (you must create/download and place here)
+- `token.json` — OAuth token created after first OAuth flow (automatically refreshed/overwritten)
+- `state.json` — Tracks video upload status
+- `state-thumbnails.json` — Tracks thumbnail upload status
 
 ## Environment variables (.env)
-You can place values in a `.env` file (or set them in your environment). Defaults are provided in the script.
-- `OPENAI_API_KEY` (required) — API key used by the OpenAI client.
-- `VIDEO_OUTPUT_DIR` (optional) — default: `downloaded_videos`
-- `TRANSCRIPTS_DIR` (optional) — default: `transcripts`
-- `EXCEL_FILENAME` (optional) — default: `transcripts.xlsx`
-- `EXCEL_FILE_PATH` (optional) — full path to the Excel file. If not set, the script builds from `TRANSCRIPTS_DIR` + `EXCEL_FILENAME`.
+You can place values in a `.env` file (or set them in your environment). Defaults are provided in the scripts.
+
+### Main Script Variables (full-rounded-url-download-transcription.py)
+- `OPENAI_API_KEY` (required) — API key used by the OpenAI client
+- `VIDEO_OUTPUT_DIR` (optional) — default: `downloads/videos`
+- `AUDIO_OUTPUT_DIR` (optional) — default: `downloads/audio`
+- `THUMBNAILS_DIR` (optional) — default: `downloads/thumbnails`
+- `TRANSCRIPTS_DIR` (optional) — default: `downloads/transcripts`
+- `EXCEL_FILENAME` (optional) — default: `video_transcripts.xlsx`
+- `EXCEL_FILE_PATH` (optional) — full path to the Excel file
+
+### Video Uploader Variables (upload-new-video-to-google.py)
+- `FOLDER_TO_WATCH` (optional) — folder to monitor for videos, default: current directory
+- `DRIVE_FOLDER` (optional) — Google Drive folder name, default: 'AIWaverider'
+
+### Thumbnail Uploader Variables (upload-thumbnails-to-google.py)
+- `THUMBNAILS_DIR` (optional) — folder to watch for thumbnails, default: 'downloads/thumbnails'
+- `THUMBNAILS_STATE_FILE` (optional) — state tracking file, default: 'state-thumbnails.json'
+- `THUMBNAILS_DRIVE_FOLDER_ID` (optional) — specific Drive folder ID for thumbnails
 
 Example `.env`:
 
@@ -48,23 +65,28 @@ pip install -r requirements.txt
 (If `requirements.txt` is not updated, ensure you have: `yt-dlp`, `ffmpeg-python`, `openai`, `whisper` or `openai-whisper` as used, `openpyxl`, `python-dotenv`, `google-api-python-client`, `google-auth-httplib2`, `google-auth-oauthlib`, `pydub`, `torch`.)
 
 ## Usage
-Single URL (interactive prompt):
 
+### Main Processing Script
+Process videos in batch mode from `urls.txt` (one URL per line):
 ```powershell
-python .\transcribe-videos.py
-# then paste the URL at the prompt
+python .\full-rounded-url-download-transcription.py --urls-file urls.txt
 ```
 
-Single URL (non-interactive):
-
+Single URL mode:
 ```powershell
-python .\transcribe-videos.py --url "https://www.tiktok.com/...?"
+python .\full-rounded-url-download-transcription.py --url "https://www.tiktok.com/...?"
 ```
 
-Batch mode from `urls.txt` (one URL per line):
-
+### Video Upload Monitor
+Start the continuous video upload monitor:
 ```powershell
-python .\transcribe-videos.py --urls-file urls.txt
+python .\upload-new-video-to-google.py
+```
+
+### Thumbnail Upload
+Upload thumbnails to the specified Drive folder:
+```powershell
+python .\upload-thumbnails-to-google.py
 ```
 
 The script will:
