@@ -16,6 +16,7 @@ import os
 import json
 import time
 import hashlib
+import schedule
 from datetime import datetime
 from typing import Dict
 from google.oauth2.credentials import Credentials
@@ -157,20 +158,23 @@ def find_image_files(folder: str):
     return files
 
 
-def main():
-    print(f"Thumbnail uploader starting. Watching: {THUMBNAILS_DIR}")
-    print(f"State file: {STATE_FILE}")
+def check_and_upload():
+    """
+    Scan the thumbnails directory and upload new/modified image files.
+    """
+    print(f"\n[{datetime.now()}] Starting thumbnail scan in: {THUMBNAILS_DIR}")
     print(f"Target Drive folder ID: {DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID}")
-
+    
     state = load_state(STATE_FILE)
     files = find_image_files(THUMBNAILS_DIR)
+    
     if not files:
         print("No image files found to upload.")
         return
 
     service = get_drive_service()
-
     uploaded = 0
+    
     for f in sorted(files):
         try:
             res = upload_file(service, f, DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID, state)
@@ -179,8 +183,32 @@ def main():
         except Exception as e:
             print(f"Error uploading {f}: {e}")
 
-    save_state(STATE_FILE, state)
-    print(f"Done. Uploaded/updated: {uploaded} file(s)")
+    if uploaded > 0:
+        save_state(STATE_FILE, state)
+        print(f"Done. Uploaded/updated: {uploaded} file(s)")
+
+def main():
+    """
+    Run initial check and then schedule periodic checks.
+    """
+    print(f"Thumbnail uploader starting.")
+    print(f"Watching directory: {THUMBNAILS_DIR}")
+    print(f"State file: {STATE_FILE}")
+    print(f"Target Drive folder ID: {DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID}")
+    
+    # Do initial check
+    check_and_upload()
+    
+    # Schedule periodic checks
+    schedule.every(1).minutes.do(check_and_upload)
+    
+    print("\nThumbnail monitor is running. Press Ctrl+C to exit.")
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nExiting thumbnail monitor...")
 
 
 if __name__ == '__main__':
