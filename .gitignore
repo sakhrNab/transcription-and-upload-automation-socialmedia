@@ -6,6 +6,7 @@ credentials.json
 downloaded_videos
 EditedVideos
 downloads
+json_backups
 
 # Env
 .venv
@@ -30,3 +31,13 @@ downloads
 
 # Cache
 __pycache__/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+social_media.db
+
+# Database backups
+*.db.backup
+*.sqlite.backup

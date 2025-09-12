@@ -31,6 +31,13 @@ except ImportError:
     TQDM_AVAILABLE = False
 from processor_logger import processor_logger as logger
 from dotenv import load_dotenv
+
+# Import new systems
+from config import settings
+from database import db_manager
+from error_recovery import retry_async, RetryConfig, GOOGLE_API_RETRY_CONFIG, AIWAVERIDER_RETRY_CONFIG
+from health_metrics import metrics_collector, ProcessingMetrics
+from queue_processor import queue_processor, TaskType
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -40,17 +47,17 @@ from googleapiclient.http import MediaFileUpload
 # Load environment variables
 load_dotenv()
 
-# Configuration
+# Configuration - now using centralized config
 SCOPES = ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/spreadsheets']
-CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
-TOKEN_FILE = os.getenv('GOOGLE_TOKEN_FILE', 'token.json')
-MASTER_SHEET_ID = '1HNKPIhq1kB1xoS52cM2U7KOdiJS8pqiQ7j_fbTQOUPI'  # Updated with new sheet ID
-MASTER_SHEET_NAME = 'socialmedia_tracker'
+CREDENTIALS_FILE = settings.google_credentials_file
+TOKEN_FILE = settings.google_token_file
+MASTER_SHEET_ID = settings.master_sheet_id
+MASTER_SHEET_NAME = settings.master_sheet_name
 
 # AIWaverider Drive Configuration
-AIWAVERIDER_UPLOAD_URL = os.getenv('UPLOAD_FILE_AIWAVERIDER', 'https://drive-backend.aiwaverider.com/webhook/files/upload')
-AIWAVERIDER_TOKEN = os.getenv('AIWAVERIDER_DRIVE_TOKEN')
-CACHE_DURATION_HOURS = int(os.getenv('CACHE_DURATION_HOURS', '1'))
+AIWAVERIDER_UPLOAD_URL = settings.aiwaverider_upload_url
+AIWAVERIDER_TOKEN = settings.aiwaverider_token
+CACHE_DURATION_HOURS = settings.cache_duration_hours
 
 # Global session for connection pooling
 _http_session = None
@@ -1089,6 +1096,7 @@ async def _upload_small_file_async(file_path: str, folder_path: str, file_type: 
     with ThreadPoolExecutor() as executor:
         return await loop.run_in_executor(executor, _upload_small_file, file_path, folder_path, file_type)
 
+@retry_async(AIWAVERIDER_RETRY_CONFIG, "aiwaverider")
 def _upload_small_file(file_path: str, folder_path: str, file_type: str) -> bool:
     """Upload small files (< 10MB) using regular upload endpoint"""
     try:
@@ -1496,8 +1504,20 @@ async def upload_to_aiwaverider():
 
 async def main():
     try:
-        logger.log_step("Starting social media processor")
-            
+        logger.log_step("Starting social media processor with advanced features")
+        
+        # Initialize database
+        await db_manager.initialize()
+        logger.log_step("Database initialized")
+        
+        # Start metrics collection
+        processing_metrics = metrics_collector.start_processing_metrics()
+        logger.log_step("Metrics collection started")
+        
+        # Start queue processor
+        await queue_processor.start()
+        logger.log_step("Queue processor started")
+        
         # Verify required files exist
         required_files = [
             'upload-new-video-to-google.py',
@@ -1553,7 +1573,24 @@ async def main():
     print("Updating master tracking sheet...")
     update_master_sheet('state.json', 'state-thumbnails.json')
     
+    # Step 5: Finish metrics collection
+    metrics_collector.finish_processing_metrics()
+    
+    # Step 6: Get health status
+    health_status = await metrics_collector.get_health_status()
+    logger.log_step(f"System health: {health_status['overall_status']}")
+    
+    # Step 7: Get queue status
+    queue_status = await queue_processor.get_queue_status()
+    logger.log_step(f"Queue status: {queue_status['pending_tasks']} pending tasks")
+    
+    # Step 8: Cleanup
+    await queue_processor.stop()
+    await db_manager.close()
+    
     print("\nProcessing complete! Check the master sheet for status.")
+    print(f"System health: {health_status['overall_status']}")
+    print(f"Queue status: {queue_status['pending_tasks']} pending tasks")
 
 if __name__ == '__main__':
     asyncio.run(main())
