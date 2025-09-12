@@ -1,56 +1,112 @@
-Transcribe & Upload Videos to Google Drive
+Social Media Content Processor & Tracker
 
-A small Python utility that downloads a single video (TikTok/Instagram/etc.) via yt-dlp, converts it to audio, transcribes it using Whisper, appends metadata and transcript to an Excel workbook, and uploads the workbook to Google Drive.
+A comprehensive Python utility that orchestrates the entire social media content workflow: downloads videos (TikTok/Instagram/etc.) via yt-dlp, converts to audio, transcribes using Whisper, generates thumbnails, uploads to both Google Drive and AIWaverider Drive, and maintains a master tracking sheet with real-time status updates.
 
 ## Features
-- Download video from a URL using `yt_dlp`.
-- Convert video to WAV using `ffmpeg`.
-- Transcribe audio using Whisper.
-- Append a row per video to an Excel workbook (`.xlsx`) using `openpyxl`.
-- Upload the Excel workbook to Google Drive (OAuth2).
-- Batch-mode: read multiple URLs from a text file (`--urls-file`).
-- Automatic handling: if an existing Excel file is invalid/corrupt, the script will move it aside and create a fresh workbook.
+
+### Core Processing
+- Download video from a URL using `yt_dlp`
+- Convert video to WAV using `ffmpeg`
+- Transcribe audio using Whisper
+- Generate thumbnails automatically
+- Batch-mode: read multiple URLs from a text file (`--urls-file`)
+
+### Dual Upload System
+- **Google Drive**: Upload videos, thumbnails, and Excel workbooks
+- **AIWaverider Drive**: Upload videos to `/videos/instagram/ai.uprise/` and thumbnails to `/thumbnails/instagram/`
+
+### Master Tracking System
+- **Google Sheets Integration**: Real-time tracking sheet with all content status
+- **Local Backup**: Automatic local backup to `downloads/socialmedia/tracking/`
+- **Smart Updates**: Updates existing entries, appends new ones (never overwrites existing data)
+- **Thumbnail Display**: Actual thumbnail images displayed in the tracking sheet
+
+### Automation & Monitoring
+- **Continuous Monitoring**: Automatic detection of new videos and thumbnails
+- **State Management**: Tracks upload status across all platforms
+- **Error Handling**: Robust error handling with detailed logging
+- **Offline Mode**: Continues working even when Google services are unavailable
 
 ## Core Scripts and Files
-- `full-rounded-url-download-transcription.py` — Main script for downloading and processing videos
+
+### Main Scripts
+- `social_media_processor.py` — **Master orchestrator script** that runs the entire workflow
+- `full-rounded-url-download-transcription.py` — Downloads and processes videos
 - `upload-new-video-to-google.py` — Continuous monitor for uploading MP4 files to Google Drive
-- `upload-thumbnails-to-google.py` — Handles thumbnail uploads to a specific Drive folder
+- `upload-thumbnails-to-google.py` — Handles thumbnail uploads to Google Drive
+
+### Configuration Files
 - `requirements.txt` — Python dependencies (install into a venv)
-- `credentials.json` — Google API client credentials (you must create/download and place here)
-- `token.json` — OAuth token created after first OAuth flow (automatically refreshed/overwritten)
-- `state.json` — Tracks video upload status
-- `state-thumbnails.json` — Tracks thumbnail upload status
+- `credentials.json` — Google API client credentials
+- `token.json` — OAuth token (automatically refreshed/overwritten)
+- `.env` — Environment variables and API keys
 
-## Environment variables (.env)
-You can place values in a `.env` file (or set them in your environment). Defaults are provided in the scripts.
+### State & Tracking Files
+- `state.json` — Tracks video upload status to Google Drive
+- `state-thumbnails.json` — Tracks thumbnail upload status to Google Drive
+- `master_sheet_backup.json` — Local backup of Google Sheets data
+- `downloads/socialmedia/tracking/` — Local tracking data (JSON & CSV)
 
-### Main Script Variables (full-rounded-url-download-transcription.py)
-- `OPENAI_API_KEY` (required) — API key used by the OpenAI client
+### Output Directories
+- `downloads/videos/` — Downloaded video files
+- `downloads/audio/` — Extracted audio files
+- `downloads/thumbnails/` — Generated thumbnail images
+- `downloads/transcripts/` — Transcription files and Excel workbook
+- `finished_videos/` — Processed videos ready for upload
+
+## Environment Variables (.env)
+
+### Required API Keys
+- `OPENAI_API_KEY` (required) — OpenAI API key for GPT-4o-mini naming
+- `AIWAVERIDER_DRIVE_TOKEN` (required) — Bearer token for AIWaverider Drive API
+- `UPLOAD_FILE_AIWAVERIDER` (required) — AIWaverider upload endpoint URL
+
+### Google Services
+- `GOOGLE_CREDENTIALS_FILE` (optional) — default: `credentials.json`
+- `GOOGLE_TOKEN_FILE` (optional) — default: `token.json`
+- `MASTER_SHEET_ID` (required) — Google Sheets ID for master tracking
+
+### Directory Configuration
 - `VIDEO_OUTPUT_DIR` (optional) — default: `downloads/videos`
 - `AUDIO_OUTPUT_DIR` (optional) — default: `downloads/audio`
 - `THUMBNAILS_DIR` (optional) — default: `downloads/thumbnails`
 - `TRANSCRIPTS_DIR` (optional) — default: `downloads/transcripts`
+- `FOLDER_TO_WATCH` (optional) — folder to monitor for videos, default: `finished_videos`
+
+### Upload Configuration
+- `THUMBNAILS_DRIVE_FOLDER_ID` (optional) — Google Drive folder ID for thumbnails
+- `DRIVE_FOLDER` (optional) — Google Drive folder name, default: 'AIWaverider'
+
+### Excel Configuration
 - `EXCEL_FILENAME` (optional) — default: `video_transcripts.xlsx`
 - `EXCEL_FILE_PATH` (optional) — full path to the Excel file
 
-### Video Uploader Variables (upload-new-video-to-google.py)
-- `FOLDER_TO_WATCH` (optional) — folder to monitor for videos, default: current directory
-- `DRIVE_FOLDER` (optional) — Google Drive folder name, default: 'AIWaverider'
-
-### Thumbnail Uploader Variables (upload-thumbnails-to-google.py)
-- `THUMBNAILS_DIR` (optional) — folder to watch for thumbnails, default: 'downloads/thumbnails'
-- `THUMBNAILS_STATE_FILE` (optional) — state tracking file, default: 'state-thumbnails.json'
-- `THUMBNAILS_DRIVE_FOLDER_ID` (optional) — specific Drive folder ID for thumbnails
-
-Example `.env`:
+### Example `.env`:
 
 ```text
-OPENAI_API_KEY=sk-...
-VIDEO_OUTPUT_DIR=downloaded_videos
-TRANSCRIPTS_DIR=transcripts
-EXCEL_FILENAME=transcripts.xlsx
-# or use EXCEL_FILE_PATH to fully override
-# EXCEL_FILE_PATH=transcripts/transcripts.xlsx
+# Required API Keys
+OPENAI_API_KEY=sk-proj-...
+AIWAVERIDER_DRIVE_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+UPLOAD_FILE_AIWAVERIDER=https://drive-backend.aiwaverider.com/webhook/files/upload
+
+# Google Services
+MASTER_SHEET_ID=1HNKPIhq1kB1xoS52cM2U7KOdiJS8pqiQ7j_fbTQOUPI
+GOOGLE_CREDENTIALS_FILE=credentials.json
+GOOGLE_TOKEN_FILE=token.json
+
+# Directory Configuration
+VIDEO_OUTPUT_DIR=downloads/videos
+AUDIO_OUTPUT_DIR=downloads/audio
+THUMBNAILS_DIR=downloads/thumbnails
+TRANSCRIPTS_DIR=downloads/transcripts
+FOLDER_TO_WATCH=finished_videos
+
+# Upload Configuration
+THUMBNAILS_DRIVE_FOLDER_ID=1iUmCVkX863MqyvJIZ_aWbi9toEI39X8Z
+DRIVE_FOLDER=AIWaverider
+
+# Excel Configuration
+EXCEL_FILENAME=video_transcripts.xlsx
 ```
 
 ## Install
@@ -66,8 +122,24 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Main Processing Script
-Process videos in batch mode from `urls.txt` (one URL per line):
+### Master Script (Recommended)
+Run the complete workflow with a single command:
+```powershell
+python .\social_media_processor.py
+```
+
+This will:
+1. Process all URLs from `urls.txt`
+2. Download videos and generate thumbnails
+3. Upload to Google Drive
+4. Upload to AIWaverider Drive
+5. Update the master tracking sheet
+6. Save local backups
+
+### Individual Scripts
+
+#### Video Processing
+Process videos in batch mode from `urls.txt`:
 ```powershell
 python .\full-rounded-url-download-transcription.py --urls-file urls.txt
 ```
@@ -77,35 +149,53 @@ Single URL mode:
 python .\full-rounded-url-download-transcription.py --url "https://www.tiktok.com/...?"
 ```
 
-### Video Upload Monitor
+#### Upload Monitors
 Start the continuous video upload monitor:
 ```powershell
 python .\upload-new-video-to-google.py
 ```
 
-### Thumbnail Upload
-Upload thumbnails to the specified Drive folder:
+Upload thumbnails to Google Drive:
 ```powershell
 python .\upload-thumbnails-to-google.py
 ```
 
-The script will:
-- download each video into `VIDEO_OUTPUT_DIR`;
-- convert audio and transcribe;
-- append a row to the Excel workbook at `EXCEL_FILE_PATH` (created if missing);
-- upload the final workbook to Google Drive.
+### Workflow Overview
+1. **Download & Process**: Videos are downloaded, converted to audio, and transcribed
+2. **Thumbnail Generation**: Automatic thumbnail creation from video frames
+3. **Dual Upload**: Content uploaded to both Google Drive and AIWaverider Drive
+4. **Master Tracking**: Real-time status updates in Google Sheets
+5. **Local Backup**: All data saved locally for offline access
 
-## Thumbnail uploader
+## Master Tracking System
 
-A companion script `upload-thumbnails-to-google.py` uploads images from the thumbnails folder to a specified Google Drive folder and tracks uploads in `state-thumbnails.json`.
+The system includes a comprehensive tracking system that monitors all content across platforms:
 
-Usage:
+### Google Sheets Integration
+- **Real-time Updates**: Automatic status updates for all uploads
+- **Thumbnail Display**: Actual thumbnail images displayed in the sheet
+- **Smart Updates**: Updates existing entries, appends new ones (never overwrites)
+- **Column Structure**: Tracks drive IDs, filenames, upload times, and status across platforms
 
-```powershell
-python .\upload-thumbnails-to-google.py
-```
+### Local Backup System
+- **Automatic Backup**: All data saved to `downloads/socialmedia/tracking/`
+- **Multiple Formats**: Data saved as both JSON and CSV
+- **Offline Mode**: Continues working when Google services are unavailable
+- **Data Recovery**: Local backups can be used to restore lost data
 
-You may set `THUMBNAILS_DIR`, `THUMBNAILS_STATE_FILE`, and `THUMBNAILS_DRIVE_FOLDER_ID` in `.env` to customize behavior.
+### AIWaverider Drive Integration
+- **Dual Upload**: Content uploaded to both Google Drive and AIWaverider Drive
+- **Organized Structure**: 
+  - Videos: `/videos/instagram/ai.uprise/`
+  - Thumbnails: `/thumbnails/instagram/`
+- **Authentication**: Uses Bearer token authentication
+- **Error Handling**: Robust error handling with detailed logging
+
+### State Management
+- **Video Tracking**: `state.json` tracks video upload status to Google Drive
+- **Thumbnail Tracking**: `state-thumbnails.json` tracks thumbnail upload status
+- **Master Backup**: `master_sheet_backup.json` backs up Google Sheets data
+- **Persistent State**: State files persist across runs for efficient processing
 
 ## Google OAuth / tokens
 - Place `credentials.json` (Google API client credentials) in the repo root.
@@ -121,15 +211,63 @@ If the script detects the existing Excel file is invalid (unsupported or corrupt
 Video downloading/fetching is handled by `yt_dlp` (`download_video()` inside `transcribe-videos.py`). `yt_dlp` supports many sites (TikTok, Instagram, YouTube, etc.) and chooses the best available formats; the script requests `mp4` format and saves it to `VIDEO_OUTPUT_DIR`.
 
 ## Troubleshooting
-- If you get an `InvalidFileException`, follow the README section above or remove/rename the bad Excel file so the script can recreate it.
-- If `OPENAI_API_KEY` is not set the script will abort — set it in `.env` or your environment.
-- If Google upload fails, check `credentials.json` and ensure you completed OAuth to produce `token.json`.
-- Missing Python packages will show import errors; install required packages into the virtualenv.
 
-## Optional improvements
-- Add `--no-upload` to skip Google Drive upload.
-- Add parallel processing (careful with memory/GPUs).
-- Persist logs for debugging.
+### Common Issues
+
+#### Authentication Errors
+- **Google OAuth**: Ensure `credentials.json` is present and `token.json` is valid
+- **AIWaverider Token**: Check `AIWAVERIDER_DRIVE_TOKEN` in `.env` file
+- **Sheet Access**: Verify `MASTER_SHEET_ID` is correct and sheet exists
+
+#### Upload Issues
+- **Google Drive**: Check folder permissions and available storage
+- **AIWaverider Drive**: Verify API endpoint and token validity
+- **Large Files**: Video uploads may timeout; check network connection
+
+#### Data Issues
+- **Excel Corruption**: Script will automatically backup and recreate corrupted files
+- **Missing State Files**: Script will create new state files if missing
+- **Sheet Updates**: Existing data is never overwritten; new data is appended
+
+#### Performance Issues
+- **Memory Usage**: Large videos may require more RAM
+- **Network Timeouts**: Increase timeout values in configuration
+- **Concurrent Uploads**: Script handles uploads sequentially to avoid conflicts
+
+### Error Recovery
+- **Offline Mode**: Script continues working with local backups when services are unavailable
+- **State Recovery**: Delete state files to force re-upload of all content
+- **Sheet Recovery**: Use local backup files to restore lost data
+
+### Debug Mode
+Enable detailed logging by setting `LOG_LEVEL=DEBUG` in `.env` file.
+
+## Advanced Features
+
+### Smart Data Management
+- **Incremental Updates**: Only processes new or changed content
+- **State Persistence**: Maintains state across runs for efficiency
+- **Conflict Resolution**: Handles duplicate content gracefully
+- **Data Integrity**: Validates data before uploading
+
+### Monitoring & Logging
+- **Comprehensive Logging**: Detailed logs for all operations
+- **Progress Tracking**: Real-time status updates
+- **Error Reporting**: Detailed error messages with context
+- **Performance Metrics**: Tracks processing times and success rates
+
+### Scalability
+- **Batch Processing**: Handles multiple videos efficiently
+- **Resource Management**: Optimized memory and CPU usage
+- **Network Optimization**: Efficient upload strategies
+- **Error Recovery**: Automatic retry mechanisms
+
+## Optional Improvements
+- Add `--no-upload` to skip uploads for testing
+- Add parallel processing for faster batch operations
+- Implement webhook notifications for upload completion
+- Add support for additional video platforms
+- Implement content scheduling and automation
 
 ## License
 No license specified — treat this repository as private/internal unless you add a license file.

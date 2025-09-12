@@ -5,6 +5,7 @@ credentials.json
 # Folders
 downloaded_videos
 EditedVideos
+downloads
 
 # Env
 .venv
@@ -25,6 +26,7 @@ EditedVideos
 
 # Logs
 *.json
+*.log
 
 # Cache
 __pycache__/

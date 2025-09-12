@@ -3,6 +3,7 @@ import json
 import time
 import schedule
 import hashlib
+import argparse
 from datetime import datetime
 from tqdm import tqdm
 from dotenv import load_dotenv
@@ -334,22 +335,40 @@ def check_and_upload():
 # ---------------------------
 # Scheduler Setup
 # ---------------------------
-def main():
-    check_and_upload()
-    schedule.every(1).minutes.do(check_and_upload)
+def main(single_run=False):
+    """
+    Run video uploader in either single-run or continuous mode.
+    Args:
+        single_run (bool): If True, run once and exit. If False, run continuously.
+    """
+    print(f"Video uploader starting in {'single-run' if single_run else 'continuous'} mode")
     
-    print("Folder monitor is running. Press Ctrl+C to exit.")
-    try:
-        while True:
-            next_run = schedule.next_run()
-            now = datetime.now()
-            if next_run:
-                sleep_duration = (next_run - now).total_seconds()
-                if sleep_duration > 0:
-                    time.sleep(sleep_duration)
-            schedule.run_pending()
-    except KeyboardInterrupt:
-        print("Exiting...")
+    # Always do initial check
+    check_and_upload()
+    
+    if not single_run:
+        # Only schedule periodic checks in continuous mode
+        schedule.every(1).minutes.do(check_and_upload)
+        
+        print("Video monitor is running in continuous mode. Press Ctrl+C to exit.")
+        try:
+            while True:
+                next_run = schedule.next_run()
+                now = datetime.now()
+                if next_run:
+                    sleep_duration = (next_run - now).total_seconds()
+                    if sleep_duration > 0:
+                        time.sleep(sleep_duration)
+                schedule.run_pending()
+        except KeyboardInterrupt:
+            print("Exiting video monitor...")
+    else:
+        print("Video check completed (single run mode)")
 
 if __name__ == '__main__':
-    main()
+    # Add command line argument parsing
+    parser = argparse.ArgumentParser(description='Upload videos to Google Drive')
+    parser.add_argument('--single-run', action='store_true', help='Run once and exit (default: continuous mode)')
+    args = parser.parse_args()
+    
+    main(single_run=args.single_run)

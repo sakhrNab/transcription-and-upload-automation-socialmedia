@@ -17,6 +17,7 @@ import json
 import time
 import hashlib
 import schedule
+import argparse
 from datetime import datetime
 from typing import Dict
 from google.oauth2.credentials import Credentials
@@ -187,29 +188,40 @@ def check_and_upload():
         save_state(STATE_FILE, state)
         print(f"Done. Uploaded/updated: {uploaded} file(s)")
 
-def main():
+def main(single_run=False):
     """
-    Run initial check and then schedule periodic checks.
+    Run thumbnail uploader in either single-run or continuous mode.
+    Args:
+        single_run (bool): If True, run once and exit. If False, run continuously.
     """
     print(f"Thumbnail uploader starting.")
     print(f"Watching directory: {THUMBNAILS_DIR}")
     print(f"State file: {STATE_FILE}")
     print(f"Target Drive folder ID: {DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID}")
+    print(f"Mode: {'single-run' if single_run else 'continuous'}")
     
     # Do initial check
     check_and_upload()
     
-    # Schedule periodic checks
-    schedule.every(1).minutes.do(check_and_upload)
-    
-    print("\nThumbnail monitor is running. Press Ctrl+C to exit.")
-    try:
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nExiting thumbnail monitor...")
+    if not single_run:
+        # Schedule periodic checks only in continuous mode
+        schedule.every(1).minutes.do(check_and_upload)
+        
+        print("\nThumbnail monitor is running in continuous mode. Press Ctrl+C to exit.")
+        try:
+            while True:
+                schedule.run_pending()
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nExiting thumbnail monitor...")
+    else:
+        print("\nThumbnail check completed (single run mode)")
 
 
 if __name__ == '__main__':
-    main()
+    # Add command line argument parsing
+    parser = argparse.ArgumentParser(description='Upload thumbnails to Google Drive')
+    parser.add_argument('--single-run', action='store_true', help='Run once and exit (default: continuous mode)')
+    args = parser.parse_args()
+    
+    main(single_run=args.single_run)
