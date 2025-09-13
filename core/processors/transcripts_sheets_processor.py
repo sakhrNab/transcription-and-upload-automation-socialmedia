@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.database import DatabaseManager
 from system.config import settings
 from system.error_recovery import retry_async, RetryConfig, GOOGLE_API_RETRY_CONFIG, CircuitBreaker
 
@@ -46,6 +46,9 @@ class TranscriptsSheetsProcessor(BaseProcessor):
         self.offline_mode = True
         self.local_backup_file = 'transcripts_sheet_backup.json'
         self.local_data = {'rows': {}, 'last_sync': None}
+        
+        # Database manager
+        self.db_manager = DatabaseManager()
         
         # Circuit breaker for Google Sheets API
         self.circuit_breaker = CircuitBreaker(
@@ -120,9 +123,13 @@ class TranscriptsSheetsProcessor(BaseProcessor):
             if not self.transcripts_sheet_id:
                 await self._ensure_sheet_exists()
             
+            # Initialize database manager if needed
+            if not hasattr(self.db_manager, '_initialized') or not self.db_manager._initialized:
+                await self.db_manager.initialize()
+            
             # Get all videos and thumbnails from database
-            videos = await db_manager.get_all_videos()
-            thumbnails = await db_manager.get_all_thumbnails()
+            videos = await self.db_manager.get_all_videos()
+            thumbnails = await self.db_manager.get_all_thumbnails()
             
             if not videos:
                 self.log_step("No videos found to update in transcripts sheet")
@@ -130,6 +137,9 @@ class TranscriptsSheetsProcessor(BaseProcessor):
             
             # Prepare transcript data
             transcript_data = await self._prepare_transcript_data(videos, thumbnails)
+            
+            # Save local backup first
+            await self._save_local_backup(transcript_data)
             
             # Update the sheet
             success = await self._update_sheet_with_data(transcript_data)
@@ -149,6 +159,43 @@ class TranscriptsSheetsProcessor(BaseProcessor):
             self.log_error("Error updating transcripts sheet", e)
             self.status = "error"
             return False
+    
+    async def _save_local_backup(self, transcript_data: List[List[str]]) -> None:
+        """Save transcript data locally as CSV and JSON (offline mode)"""
+        try:
+            import os
+            import json
+            import pandas as pd
+            
+            # Create local directory following the same pattern as tracking_data
+            local_dir = os.path.join("assets", "downloads", "socialmedia", "transcripts")
+            os.makedirs(local_dir, exist_ok=True)
+            
+            # Convert to list of dictionaries for JSON
+            if transcript_data:
+                # Create headers from SHEET_COLUMNS
+                headers = self.SHEET_COLUMNS
+                
+                # Convert to list of dictionaries
+                data_dicts = []
+                for row in transcript_data:
+                    if len(row) == len(headers):
+                        data_dicts.append(dict(zip(headers, row)))
+                
+                # Save as JSON
+                json_file = os.path.join(local_dir, 'video_transcripts.json')
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(data_dicts, f, indent=2, ensure_ascii=False)
+                
+                # Save as CSV
+                csv_file = os.path.join(local_dir, 'video_transcripts.csv')
+                df = pd.DataFrame(data_dicts)
+                df.to_csv(csv_file, index=False, encoding='utf-8')
+                
+                self.log_step(f"Transcript data saved locally to {local_dir}")
+            
+        except Exception as e:
+            self.log_error("Error saving local backup", e)
     
     async def _prepare_transcript_data(self, videos: List[Dict], thumbnails: List[Dict]) -> List[Dict]:
         """Prepare transcript data for sheet update"""
