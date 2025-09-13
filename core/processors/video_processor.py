@@ -29,6 +29,7 @@ import whisper
 import requests
 import torch
 import gc
+import psutil
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -49,17 +50,20 @@ class VideoProcessor(BaseProcessor):
         self.thumbnails_dir = "assets/downloads/thumbnails"
         self.transcripts_dir = "assets/downloads/transcripts"
         
-        # Processing configuration
-        self.whisper_model = os.getenv("WHISPER_MODEL", "base")
-        self.max_audio_duration = int(os.getenv("MAX_AUDIO_DURATION", "1800"))
-        self.chunk_duration = int(os.getenv("CHUNK_DURATION", "30"))
-        self.keep_audio_files = os.getenv("KEEP_AUDIO_FILES", "true").lower() == "true"
+        # Processing configuration from settings
+        self.whisper_model = settings.whisper_model
+        self.max_audio_duration = settings.max_audio_duration
+        self.chunk_duration = settings.chunk_duration
+        self.keep_audio_files = settings.keep_audio_files
         
         # OpenAI client
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY not set. Please add it to your .env file.")
         self.openai_client = OpenAI(api_key=api_key)
+        
+        # Parallel processing configuration
+        self.max_concurrent_videos = settings.max_concurrent_videos  # 0 = auto-detect
     
     async def initialize(self) -> bool:
         """Initialize video processor"""
@@ -94,7 +98,7 @@ class VideoProcessor(BaseProcessor):
         return await self.process_urls(urls)
     
     async def process_urls(self, urls: List[str]) -> bool:
-        """Process a list of URLs for video download and transcription"""
+        """Process a list of URLs for video download and transcription with parallel processing"""
         try:
             self.log_step(f"Processing {len(urls)} URLs")
             self.status = "processing"
@@ -113,26 +117,79 @@ class VideoProcessor(BaseProcessor):
                 self.log_step("No new URLs to process - all have been transcribed")
                 return True
             
-            # Process each URL
-            for i, url in enumerate(new_urls, 1):
-                try:
-                    success = await self._process_single_video(url, i)
-                    if success:
-                        self.processed_count += 1
-                    else:
+            # Determine optimal concurrency based on GPU availability and system resources
+            max_concurrent = self._get_optimal_concurrency()
+            self.log_step(f"Using parallel processing with max {max_concurrent} concurrent videos")
+            
+            # Create semaphore to limit concurrent processing
+            semaphore = asyncio.Semaphore(max_concurrent)
+            
+            async def process_with_semaphore(url: str, index: int) -> bool:
+                """Process a single video with semaphore control"""
+                async with semaphore:
+                    try:
+                        self.log_step(f"Starting parallel processing for video {index}")
+                        success = await self._process_single_video(url, index)
+                        if success:
+                            self.processed_count += 1
+                        else:
+                            self.failed_count += 1
+                        return success
+                    except Exception as e:
+                        self.log_error(f"Error processing URL {url}", e)
                         self.failed_count += 1
-                except Exception as e:
-                    self.log_error(f"Error processing URL {url}", e)
+                        return False
+            
+            # Process URLs in parallel
+            tasks = [process_with_semaphore(url, i) for i, url in enumerate(new_urls, 1)]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    self.log_error(f"Video processing task {i} failed: {str(result)}")
+                    self.failed_count += 1
+                elif not result:
                     self.failed_count += 1
             
             self.status = "completed"
-            self.log_step(f"Video processing completed: {self.processed_count} successful, {self.failed_count} failed")
+            self.log_step(f"Parallel video processing completed: {self.processed_count} successful, {self.failed_count} failed")
             return self.failed_count == 0
             
         except Exception as e:
             self.log_error("Error in process_urls", e)
             self.status = "error"
             return False
+    
+    def _get_optimal_concurrency(self) -> int:
+        """Calculate optimal concurrency based on system resources and GPU availability"""
+        if self.max_concurrent_videos > 0:
+            return self.max_concurrent_videos
+        
+        # Auto-detect optimal concurrency
+        import psutil
+        
+        # Base concurrency on CPU cores
+        cpu_cores = psutil.cpu_count(logical=False)  # Physical cores
+        
+        # GPU availability affects optimal concurrency
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+            if gpu_memory >= 8:  # High-end GPU
+                optimal = min(cpu_cores * 2, 6)  # Up to 6 concurrent with high-end GPU
+            elif gpu_memory >= 4:  # Mid-range GPU
+                optimal = min(cpu_cores, 4)  # Up to 4 concurrent with mid-range GPU
+            else:  # Low-end GPU
+                optimal = min(cpu_cores // 2, 2)  # Conservative with low-end GPU
+        else:
+            # CPU-only processing - more conservative
+            optimal = max(1, cpu_cores // 2)
+        
+        # Ensure minimum of 1 and maximum of 8
+        optimal = max(1, min(optimal, 8))
+        
+        self.log_step(f"Auto-detected optimal concurrency: {optimal} (CPU cores: {cpu_cores}, GPU: {torch.cuda.is_available()})")
+        return optimal
     
     async def _process_single_video(self, url: str, index: int) -> bool:
         """Process a single video through the complete pipeline"""
@@ -368,23 +425,28 @@ class VideoProcessor(BaseProcessor):
             raise Exception(f"Audio conversion failed: {str(e)}")
     
     async def _transcribe_audio_with_whisper(self, audio_file: str, index: int) -> str:
-        """Transcribe audio using Whisper with comprehensive logging and GPU optimization"""
+        """Transcribe audio using Whisper with comprehensive logging and GPU optimization for parallel processing"""
         self.log_step(f"Starting transcription with {self.whisper_model} model for video {index}")
         
         try:
             # Check GPU availability and set device
             device = "cuda" if torch.cuda.is_available() else "cpu"
             if torch.cuda.is_available():
+                # Clear GPU memory before transcription
                 torch.cuda.empty_cache()
-                self.log_step(f"GPU detected: {torch.cuda.get_device_name(0)} (CUDA {torch.version.cuda})")
+                # Get GPU memory info for parallel processing optimization
+                gpu_memory_allocated = torch.cuda.memory_allocated() / (1024**3)
+                gpu_memory_reserved = torch.cuda.memory_reserved() / (1024**3)
+                self.log_step(f"GPU detected: {torch.cuda.get_device_name(0)} (CUDA {torch.version.cuda}) - Memory: {gpu_memory_allocated:.2f}GB allocated, {gpu_memory_reserved:.2f}GB reserved")
             else:
                 self.log_step("No GPU detected, using CPU")
             
             transcription_start = time.time()
             
             # Load model with explicit device specification
+            # For parallel processing, we load the model fresh each time to avoid conflicts
             model = whisper.load_model(self.whisper_model, device=device)
-            self.log_step(f"Loaded {self.whisper_model} model on {device.upper()}")
+            self.log_step(f"Loaded {self.whisper_model} model on {device.upper()} for video {index}")
             
             # Check audio duration
             audio_duration = self._get_audio_duration(audio_file)
