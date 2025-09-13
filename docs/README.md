@@ -30,10 +30,11 @@ A comprehensive Python utility that orchestrates the entire social media content
 ## Core Scripts and Files
 
 ### Main Scripts
-- `social_media_processor.py` — **Master orchestrator script** that runs the entire workflow
-- `full-rounded-url-download-transcription.py` — Downloads and processes videos
-- `upload-new-video-to-google.py` — Continuous monitor for uploading MP4 files to Google Drive
-- `upload-thumbnails-to-google.py` — Handles thumbnail uploads to Google Drive
+- `main.py` — **Main entry point** for easy system access
+- `core/social_media_processor.py` — **Master orchestrator script** that runs the entire workflow
+- `core/full-rounded-url-download-transcription.py` — Downloads and processes videos
+- `scripts/upload-new-video-to-google.py` — Continuous monitor for uploading MP4 files to Google Drive
+- `scripts/upload-thumbnails-to-google.py` — Handles thumbnail uploads to Google Drive
 
 ### Configuration Files
 - `requirements.txt` — Python dependencies (install into a venv)
@@ -125,7 +126,12 @@ pip install -r requirements.txt
 ### Master Script (Recommended)
 Run the complete workflow with a single command:
 ```powershell
-python .\social_media_processor.py
+python main.py
+```
+
+Or run the core processor directly:
+```powershell
+python core\social_media_processor.py
 ```
 
 This will:

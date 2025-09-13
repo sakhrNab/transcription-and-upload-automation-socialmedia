@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     """Centralized configuration with validation"""
     
     # Google API Configuration
-    google_credentials_file: str = Field(default="credentials.json", description="Google API credentials file")
-    google_token_file: str = Field(default="token.json", description="Google API token file")
+    google_credentials_file: str = Field(default="config/credentials.json", description="Google API credentials file")
+    google_token_file: str = Field(default="config/token.json", description="Google API token file")
     master_sheet_id: str = Field(default="1HNKPIhq1kB1xoS52cM2U7KOdiJS8pqiQ7j_fbTQOUPI", description="Google Sheets ID for master tracking")
     master_sheet_name: str = Field(default="socialmedia_tracker", description="Google Sheets name")
     

@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from enum import Enum
-from config import settings
-from database import db_manager
-from processor_logger import processor_logger as logger
+from .config import settings
+from .database import db_manager
+from .processor_logger import processor_logger as logger
 
 class MetricType(Enum):
     COUNTER = "counter"

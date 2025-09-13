@@ -29,15 +29,19 @@ try:
     TQDM_AVAILABLE = True
 except ImportError:
     TQDM_AVAILABLE = False
-from processor_logger import processor_logger as logger
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from system.processor_logger import processor_logger as logger
 from dotenv import load_dotenv
 
 # Import new systems
-from config import settings
-from database import db_manager
-from error_recovery import retry_async, RetryConfig, GOOGLE_API_RETRY_CONFIG, AIWAVERIDER_RETRY_CONFIG
-from health_metrics import metrics_collector, ProcessingMetrics
-from queue_processor import queue_processor, TaskType
+from system.config import settings
+from system.database import db_manager
+from system.error_recovery import retry_async, RetryConfig, GOOGLE_API_RETRY_CONFIG, AIWAVERIDER_RETRY_CONFIG
+from system.health_metrics import metrics_collector, ProcessingMetrics
+from system.queue_processor import queue_processor, TaskType
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -49,8 +53,8 @@ load_dotenv()
 
 # Configuration - now using centralized config
 SCOPES = ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/spreadsheets']
-CREDENTIALS_FILE = settings.google_credentials_file
-TOKEN_FILE = settings.google_token_file
+CREDENTIALS_FILE = os.path.abspath(settings.google_credentials_file)
+TOKEN_FILE = os.path.abspath(settings.google_token_file)
 MASTER_SHEET_ID = settings.master_sheet_id
 MASTER_SHEET_NAME = settings.master_sheet_name
 
@@ -101,24 +105,43 @@ SHEET_COLUMNS = [
     'transcription_status'
 ]
 
-def load_transcription_state(state_file: str = 'transcription_state.json') -> Dict[str, Any]:
-    """Load transcription state from JSON file"""
+async def load_transcription_state_from_db() -> Dict[str, Any]:
+    """Load transcription state from database"""
     try:
-        if os.path.exists(state_file):
-            with open(state_file, 'r') as f:
-                return json.load(f)
-        return {}
+        videos = await db_manager.get_all_videos()
+        transcription_state = {}
+        for video in videos:
+            video_id = video.get('video_id', '')
+            if video_id:
+                transcription_state[video_id] = {
+                    'status': 'completed' if video.get('transcription_status') == 'COMPLETED' else 'pending',
+                    'url': video.get('url', ''),
+                    'timestamp': video.get('updated_at', ''),
+                    'transcript': video.get('transcription_text', ''),
+                    'smart_name': video.get('smart_name', '')
+                }
+        return transcription_state
     except Exception as e:
-        logger.log_error(f"Error loading transcription state: {str(e)}")
+        logger.log_error(f"Error loading transcription state from database: {str(e)}")
         return {}
 
-def save_transcription_state(state: Dict[str, Any], state_file: str = 'transcription_state.json'):
-    """Save transcription state to JSON file"""
+async def save_transcription_state_to_db(video_id: str, status: str, url: str, transcript: str = '', smart_name: str = ''):
+    """Save transcription state to database"""
     try:
-        with open(state_file, 'w') as f:
-            json.dump(state, f, indent=4)
+        await db_manager.upsert_video({
+            'filename': f"{video_id}.mp4",
+            'file_path': '',
+            'url': url,
+            'drive_id': '',
+            'drive_url': '',
+            'upload_status': 'PENDING',
+            'transcription_status': 'COMPLETED' if status == 'completed' else 'PENDING',
+            'transcription_text': transcript,
+            'smart_name': smart_name,
+            'file_hash': ''
+        })
     except Exception as e:
-        logger.log_error(f"Error saving transcription state: {str(e)}")
+        logger.log_error(f"Error saving transcription state to database: {str(e)}")
 
 def extract_video_id(url: str) -> Optional[str]:
     """Extract video ID from YouTube URL"""
@@ -434,6 +457,66 @@ class MasterSheetManager:
             logger.log_step("Local backup saved successfully")
         except Exception as e:
             logger.log_error(f"Error saving local backup: {str(e)}")
+    
+    def cleanup_duplicates(self):
+        """Remove duplicate entries from the sheet based on filename"""
+        try:
+            if not self.service:
+                logger.log_step("Cannot cleanup duplicates - no Google Sheets service")
+                return
+            
+            # Get all data from the sheet
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=MASTER_SHEET_ID,
+                range=f'{MASTER_SHEET_NAME}!A1:S1000'
+            ).execute()
+            
+            values = result.get('values', [])
+            if len(values) <= 1:  # Only headers or empty
+                logger.log_step("No data to cleanup")
+                return
+            
+            # Find duplicates by filename (column B)
+            seen_filenames = {}
+            rows_to_keep = [values[0]]  # Keep header row
+            duplicates_found = []
+            
+            for idx, row in enumerate(values[1:], start=2):
+                if row and len(row) > 1:
+                    filename = row[1]  # Column B is filename
+                    if filename in seen_filenames:
+                        duplicates_found.append(idx)
+                        logger.log_step(f"Found duplicate: {filename} at row {idx}")
+                    else:
+                        seen_filenames[filename] = idx
+                        rows_to_keep.append(row)
+            
+            if not duplicates_found:
+                logger.log_step("No duplicates found")
+                return
+            
+            # Clear the sheet and write back only unique rows
+            # First, clear all data
+            self.service.spreadsheets().values().clear(
+                spreadsheetId=MASTER_SHEET_ID,
+                range=f'{MASTER_SHEET_NAME}!A1:S1000'
+            ).execute()
+            
+            # Write back unique rows
+            if rows_to_keep:
+                body = {'values': rows_to_keep}
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=MASTER_SHEET_ID,
+                    range=f'{MASTER_SHEET_NAME}!A1',
+                    valueInputOption='USER_ENTERED',
+                    body=body
+                ).execute()
+                
+                logger.log_step(f"Cleaned up {len(duplicates_found)} duplicate entries")
+                logger.log_step(f"Sheet now has {len(rows_to_keep)-1} unique entries")
+            
+        except Exception as e:
+            logger.log_error(f"Error cleaning up duplicates: {str(e)}")
 
     def _upload_thumbnail_image(self, content_info: Dict[str, Any], row_number: int):
         """Upload thumbnail image to Google Sheets using Drive API"""
@@ -444,7 +527,7 @@ class MasterSheetManager:
                 
             # Find the thumbnail file locally
             thumbnail_path = None
-            for root, dirs, files in os.walk('downloads/thumbnails'):
+            for root, dirs, files in os.walk('assets/downloads/thumbnails'):
                 if thumbnail_name in files:
                     thumbnail_path = os.path.join(root, thumbnail_name)
                     break
@@ -620,19 +703,12 @@ class MasterSheetManager:
                         if row and len(row) > 1:
                             existing_filenames[row[1]] = idx
                 
-                # Prepare all rows for batch update
-                all_rows = []
-                next_row = len(values) + 1 if values else 2
+                # Separate existing and new entries
+                updates_to_make = []
+                new_entries = []
                 
                 for content_info in content_list:
                     filename = content_info['filename']
-                    
-                    # Determine row number
-                    if filename in existing_filenames:
-                        row_number = existing_filenames[filename]
-                    else:
-                        row_number = next_row
-                        next_row += 1
                     
                     # Prepare row data
                     row_data = []
@@ -642,25 +718,42 @@ class MasterSheetManager:
                             value = STATUS_PENDING
                         row_data.append(value)
                     
-                    all_rows.append(row_data)
+                    if filename in existing_filenames:
+                        # Update existing row
+                        row_number = existing_filenames[filename]
+                        updates_to_make.append((row_number, row_data, filename))
+                    else:
+                        # New entry
+                        new_entries.append(row_data)
                 
-                # Use batch update with values API
-                if all_rows:
-                    # Get the range for all rows
-                    start_row = 2 if not values else len(values) + 1
-                    end_row = start_row + len(all_rows)
-                    range_name = f'{MASTER_SHEET_NAME}!A{start_row}:S{end_row}'
+                # Update existing entries individually
+                for row_number, row_data, filename in updates_to_make:
+                    range_name = f'{MASTER_SHEET_NAME}!A{row_number}:S{row_number}'
+                    self.service.spreadsheets().values().update(
+                        spreadsheetId=MASTER_SHEET_ID,
+                        range=range_name,
+                        valueInputOption='USER_ENTERED',
+                        body={'values': [row_data]}
+                    ).execute()
+                    logger.log_step(f"Updated existing row {row_number} for {filename}")
+                
+                # Add new entries in batch
+                if new_entries:
+                    next_row = len(values) + 1 if values else 2
+                    end_row = next_row + len(new_entries) - 1
+                    range_name = f'{MASTER_SHEET_NAME}!A{next_row}:S{end_row}'
                     
-                    # Update all rows at once
-                    body = {'values': all_rows}
+                    body = {'values': new_entries}
                     self.service.spreadsheets().values().update(
                         spreadsheetId=MASTER_SHEET_ID,
                         range=range_name,
                         valueInputOption='USER_ENTERED',
                         body=body
                     ).execute()
-                    
-                    logger.log_step(f"Batch updated {len(content_list)} entries in Google Sheets")
+                    logger.log_step(f"Added {len(new_entries)} new entries to Google Sheets")
+                
+                total_updates = len(updates_to_make) + len(new_entries)
+                logger.log_step(f"Processed {total_updates} total entries: {len(updates_to_make)} updates, {len(new_entries)} new")
                 
             except Exception as e:
                 logger.log_error(f"Error batch updating online sheet: {str(e)}")
@@ -681,8 +774,8 @@ async def run_full_rounded(urls_file: str):
     try:
         logger.log_step("Starting full-rounded processing")
         
-        # Load transcription state
-        transcription_state = load_transcription_state()
+        # Load transcription state from database
+        transcription_state = await load_transcription_state_from_db()
         
         # Read URLs and filter already transcribed ones
         with open(urls_file, 'r', encoding='utf-8') as f:
@@ -711,7 +804,7 @@ async def run_full_rounded(urls_file: str):
         
         process = await asyncio.create_subprocess_exec(
             sys.executable,
-            'full-rounded-url-download-transcription.py',
+            'core/full-rounded-url-download-transcription.py',
             '--urls-file', temp_urls_file,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -739,17 +832,11 @@ async def run_full_rounded(urls_file: str):
                 logger.log_error(f"Error in full-rounded: {error_msg}")
             return False
             
-        # Update transcription state for successful transcriptions
-        transcription_state = load_transcription_state()
+        # Update transcription state for successful transcriptions in database
         for url in new_urls:
             video_id = extract_video_id(url)
             if video_id:
-                transcription_state[video_id] = {
-                    'status': 'completed',
-                    'url': url,
-                    'timestamp': datetime.now().isoformat()
-                }
-        save_transcription_state(transcription_state)
+                await save_transcription_state_to_db(video_id, 'completed', url)
         
         # Clean up temporary file
         try:
@@ -780,10 +867,14 @@ async def run_uploaders():
         logger.log_step("Starting video upload")
         video_uploader = await asyncio.create_subprocess_exec(
             sys.executable,
-            'upload-new-video-to-google.py',
+            'scripts/upload-new-video-to-google.py',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={"PYTHONUNBUFFERED": "1", **os.environ}  # Enable unbuffered output
+            env={
+                "PYTHONUNBUFFERED": "1", 
+                "FOLDER_TO_WATCH": "assets/finished_videos",
+                **os.environ
+            }  # Enable unbuffered output and set correct path
         )
         
         # Process video uploader output with timeout
@@ -823,10 +914,14 @@ async def run_uploaders():
         logger.log_step("Starting thumbnail upload")
         thumbnail_uploader = await asyncio.create_subprocess_exec(
             sys.executable,
-            'upload-thumbnails-to-google.py',
+            'scripts/upload-thumbnails-to-google.py',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={"PYTHONUNBUFFERED": "1", **os.environ}  # Enable unbuffered output
+            env={
+                "PYTHONUNBUFFERED": "1", 
+                "THUMBNAILS_DIR": "assets/downloads/thumbnails",
+                **os.environ
+            }  # Enable unbuffered output and set correct path
         )
         
         # Process thumbnail uploader output with timeout
@@ -872,7 +967,7 @@ async def run_uploaders():
         logger.log_error("Upload process was cancelled")
         return False
 
-def save_tracking_data_locally(tracking_data: list, local_dir: str = 'downloads/socialmedia/tracking'):
+def save_tracking_data_locally(tracking_data: list, local_dir: str = 'assets/downloads/socialmedia/tracking'):
     """Save tracking data locally as JSON and CSV"""
     try:
         # Create directory if it doesn't exist
@@ -895,70 +990,73 @@ def save_tracking_data_locally(tracking_data: list, local_dir: str = 'downloads/
     except Exception as e:
         logger.log_error(f"Error saving tracking data locally: {str(e)}")
 
-def update_master_sheet(state_file: str, thumbnails_state_file: str):
-    """Update master sheet with latest upload status"""
-    sheet_manager = MasterSheetManager()
-    
-    # Load state files
-    with open(state_file) as f:
-        video_state = json.load(f)
-    with open(thumbnails_state_file) as f:
-        thumb_state = json.load(f)
-    
-    # Load transcription state
-    transcription_state = load_transcription_state()
-    
-    # Collect all tracking data for local saving
-    all_tracking_data = []
-    
-    # Process each video and its thumbnail with progress tracking
-    video_items = list(video_state.items())
-    if TQDM_AVAILABLE and video_items:
-        video_items = tqdm(video_items, desc="Processing videos for sheet update", unit="video")
-    
-    for video_path, video_info in video_items:
-        video_name = video_info['file_name']
-        base_name = os.path.splitext(video_name)[0]
+async def update_master_sheet_from_database():
+    """Update master sheet using database data instead of JSON files"""
+    try:
+        # Get all videos and thumbnails from database
+        videos = await db_manager.get_all_videos()
+        thumbnails = await db_manager.get_all_thumbnails()
         
-        # Find matching thumbnail
-        thumb_info = None
-        for thumb_path, info in thumb_state.items():
-            if base_name in thumb_path:
-                thumb_info = info
-                break
+        # Convert to the format expected by the sheet manager
+        content_list = []
         
-        # Get transcription status if available
-        url = video_info.get('url', '')  # URL from video state
-        video_id = extract_video_id(url)
-        transcription_info = transcription_state.get(video_id, {}) if video_id else {}
-        transcription_status = 'COMPLETED' if transcription_info.get('status') == 'completed' else STATUS_PENDING
+        # Process videos
+        for video in videos:
+            # Find matching thumbnail
+            video_filename = video.get('filename', '')
+            base_name = os.path.splitext(video_filename)[0]
+            matching_thumbnail = None
+            
+            for thumbnail in thumbnails:
+                if base_name in thumbnail.get('filename', '') or base_name in thumbnail.get('video_filename', ''):
+                    matching_thumbnail = thumbnail
+                    break
+            
+            # Prepare content info with proper sheet columns
+            content_info = {
+                'drive_id': video.get('drive_id', ''),
+                'filename': video_filename,
+                'video_name': video.get('smart_name', video_filename),
+                'thumbnail_name': matching_thumbnail.get('filename', '') if matching_thumbnail else '',
+                'file_path_drive': f"https://drive.google.com/file/d/{video.get('drive_id', '')}/view" if video.get('drive_id') else '',
+                'upload_time': video.get('updated_at', ''),
+                'upload_status_youtube1': STATUS_PENDING,
+                'upload_status_youtube_aiwaverider1': STATUS_PENDING,
+                'upload_status_youtube_aiwaverider8': STATUS_PENDING,
+                'upload_status_youtube1_aiwaverider8_2': STATUS_PENDING,
+                'upload_status_insta_ai.waverider': STATUS_PENDING,
+                'upload_status_insta_ai.wave.rider': STATUS_PENDING,
+                'upload_status_insta_ai.uprise': STATUS_PENDING,
+                'upload_status_tiktok_ai.wave.rider': STATUS_PENDING,
+                'upload_status_tiktok_ai.waverider': STATUS_PENDING,
+                'upload_status_tiktok_aiwaverider9': STATUS_PENDING,
+                'upload_status_thumbnail': STATUS_UPLOADED if matching_thumbnail and matching_thumbnail.get('drive_id') else STATUS_PENDING,
+                'thumbnail_image': f"https://drive.google.com/uc?id={matching_thumbnail['drive_id']}" if matching_thumbnail and matching_thumbnail.get('drive_id') else '',
+                'transcription_status': video.get('transcription_status', 'PENDING')
+            }
+            content_list.append(content_info)
         
-        # Prepare content info
-        content_info = {
-            'drive_id': video_info.get('drive_id', ''),
-            'filename': video_name,
-            'video_name': video_name,
-            'thumbnail_name': thumb_info['file_name'] if thumb_info else '',
-            'file_path_drive': f"https://drive.google.com/file/d/{video_info.get('drive_id', '')}/view",
-            'upload_time': video_info.get('last_upload', ''),
-            'upload_status_thumbnail': STATUS_UPLOADED if thumb_info else STATUS_PENDING,
-            'thumbnail_image': f"https://drive.google.com/uc?id={thumb_info['drive_id']}" if thumb_info else '',
-            'transcription_status': transcription_status
-        }
-        
-        # Add to tracking data for local saving
-        all_tracking_data.append(content_info)
-    
-    # Batch update sheet with all content
-    if all_tracking_data:
-        logger.log_step(f"Batch updating master sheet with {len(all_tracking_data)} entries...")
-        sheet_manager.batch_update_content_status(all_tracking_data)
-        logger.log_step(f"Successfully batch updated master sheet with {len(all_tracking_data)} entries")
-    else:
-        logger.log_step("No content to update in master sheet")
-    
-    # Save tracking data locally
-    save_tracking_data_locally(all_tracking_data)
+        # Update the master sheet
+        if content_list:
+            sheet_manager = MasterSheetManager()
+            
+            # First, cleanup any existing duplicates
+            logger.log_step("Cleaning up duplicate entries in Google Sheets...")
+            sheet_manager.cleanup_duplicates()
+            
+            # Then update with current data
+            sheet_manager.batch_update_content_status(content_list)
+            logger.log_step(f"Updated master sheet with {len(content_list)} entries from database")
+            
+            # Save tracking data locally
+            save_tracking_data_locally(content_list)
+        else:
+            logger.log_step("No data found in database to update master sheet")
+            
+    except Exception as e:
+        logger.log_error(f"Error updating master sheet from database: {str(e)}")
+
+# Removed old JSON-based update_master_sheet function - now using database-based update_master_sheet_from_database()
 
 async def _sync_offline_updates(sheet_manager):
     """Try to sync any pending offline updates"""
@@ -1096,7 +1194,6 @@ async def _upload_small_file_async(file_path: str, folder_path: str, file_type: 
     with ThreadPoolExecutor() as executor:
         return await loop.run_in_executor(executor, _upload_small_file, file_path, folder_path, file_type)
 
-@retry_async(AIWAVERIDER_RETRY_CONFIG, "aiwaverider")
 def _upload_small_file(file_path: str, folder_path: str, file_type: str) -> bool:
     """Upload small files (< 10MB) using regular upload endpoint"""
     try:
@@ -1277,7 +1374,7 @@ def _complete_chunked_upload(upload_id: str, filename: str, total_chunks: int, f
 
 def get_cached_file_list(folder_path: str) -> set:
     """Get cached file list or fetch fresh data if cache is expired"""
-    cache_file = f"cache_{folder_path.replace('/', '_').replace('\\', '_')}.json"
+    cache_file = f"data/cache/cache_{folder_path.replace('/', '_').replace('\\', '_')}.json"
     
     try:
         if os.path.exists(cache_file):
@@ -1373,19 +1470,13 @@ async def upload_to_aiwaverider():
     try:
         logger.log_step("Starting AIWaverider Drive uploads")
         
-        # Load state files
-        if not os.path.exists('state.json'):
-            logger.log_error("state.json not found")
-            return False
-            
-        if not os.path.exists('state-thumbnails.json'):
-            logger.log_error("state-thumbnails.json not found")
-            return False
-            
-        with open('state.json', 'r') as f:
-            video_state = json.load(f)
-        with open('state-thumbnails.json', 'r') as f:
-            thumb_state = json.load(f)
+        # Get videos and thumbnails from database instead of JSON files
+        videos = await db_manager.get_videos_by_status('COMPLETED')
+        thumbnails = await db_manager.get_thumbnails_by_status('COMPLETED')
+        
+        if not videos and not thumbnails:
+            logger.log_step("No completed videos or thumbnails found in database")
+            return True
         
         # Get existing files from AIWaverider Drive to avoid duplicates
         logger.log_step("Checking existing files on AIWaverider Drive...")
@@ -1395,38 +1486,38 @@ async def upload_to_aiwaverider():
         # Upload videos
         logger.log_step("Uploading videos to AIWaverider Drive...")
         video_uploads = []
-        for video_path, video_info in video_state.items():
+        for video in videos:
             # Check if video has been uploaded to Google Drive (has drive_id)
-            if video_info.get('drive_id'):
-                # Use the file_path directly since it's already the full path
-                if os.path.exists(video_path):
-                    filename = os.path.basename(video_path)
+            if video.get('drive_id'):
+                file_path = video.get('file_path', '')
+                if os.path.exists(file_path):
+                    filename = os.path.basename(file_path)
                     if filename in existing_videos:
                         logger.log_step(f"Skipping video - already exists on AIWaverider Drive: {filename}")
                     else:
-                        video_uploads.append(video_path)
+                        video_uploads.append(file_path)
                         logger.log_step(f"Found video for AIWaverider upload: {filename}")
                 else:
-                    logger.log_step(f"Video file not found locally: {video_path}")
+                    logger.log_step(f"Video file not found locally: {file_path}")
         
         # Upload videos and thumbnails in parallel
         logger.log_step("Uploading videos and thumbnails to AIWaverider Drive in parallel...")
         
         # Prepare thumbnail uploads
         thumbnail_uploads = []
-        for thumb_path, thumb_info in thumb_state.items():
+        for thumbnail in thumbnails:
             # Check if thumbnail has been uploaded to Google Drive (has drive_id)
-            if thumb_info.get('drive_id'):
-                # Use the file_path directly since it's already the full path
-                if os.path.exists(thumb_path):
-                    filename = os.path.basename(thumb_path)
+            if thumbnail.get('drive_id'):
+                file_path = thumbnail.get('file_path', '')
+                if os.path.exists(file_path):
+                    filename = os.path.basename(file_path)
                     if filename in existing_thumbnails:
                         logger.log_step(f"Skipping thumbnail - already exists on AIWaverider Drive: {filename}")
                     else:
-                        thumbnail_uploads.append(thumb_path)
+                        thumbnail_uploads.append(file_path)
                         logger.log_step(f"Found thumbnail for AIWaverider upload: {filename}")
                 else:
-                    logger.log_step(f"Thumbnail file not found locally: {thumb_path}")
+                    logger.log_step(f"Thumbnail file not found locally: {file_path}")
         
         # Create upload tasks
         upload_tasks = []
@@ -1520,9 +1611,9 @@ async def main():
         
         # Verify required files exist
         required_files = [
-            'upload-new-video-to-google.py',
-            'upload-thumbnails-to-google.py',
-            'full-rounded-url-download-transcription.py'
+            'scripts/upload-new-video-to-google.py',
+            'scripts/upload-thumbnails-to-google.py',
+            'core/full-rounded-url-download-transcription.py'
         ]
         for file in required_files:
             if not os.path.exists(file):
@@ -1534,7 +1625,7 @@ async def main():
         return
     
     # Check for urls.txt and create if needed
-    urls_file = 'urls.txt'
+    urls_file = 'data/urls.txt'
     if not os.path.exists(urls_file):
         logger.log_step(f"Creating empty {urls_file}")
         try:
@@ -1571,7 +1662,8 @@ async def main():
     
     # Step 4: Update master sheet
     print("Updating master tracking sheet...")
-    update_master_sheet('state.json', 'state-thumbnails.json')
+    # Update master sheet using database data
+    await update_master_sheet_from_database()
     
     # Step 5: Finish metrics collection
     metrics_collector.finish_processing_metrics()
@@ -1585,8 +1677,23 @@ async def main():
     logger.log_step(f"Queue status: {queue_status['pending_tasks']} pending tasks")
     
     # Step 8: Cleanup
-    await queue_processor.stop()
-    await db_manager.close()
+    try:
+        await queue_processor.stop()
+        logger.log_step("Queue processor stopped")
+    except Exception as e:
+        logger.log_error(f"Error stopping queue processor: {str(e)}")
+    
+    # Give a moment for any pending database operations to complete
+    await asyncio.sleep(0.5)
+    
+    try:
+        await db_manager.close()
+        logger.log_step("Database connections closed")
+    except Exception as e:
+        logger.log_error(f"Error closing database: {str(e)}")
+    
+    # Final cleanup delay
+    await asyncio.sleep(0.5)
     
     print("\nProcessing complete! Check the master sheet for status.")
     print(f"System health: {health_status['overall_status']}")
