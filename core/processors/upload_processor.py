@@ -167,34 +167,135 @@ class UploadProcessor(BaseProcessor):
             self.log_error(f"Error checking existing file {filename}: {str(e)}")
             return None
     
+    async def _check_duplicate_by_name(self, service, filename: str, folder_id: str) -> Optional[Dict[str, Any]]:
+        """Check if file with same name already exists in Drive folder"""
+        try:
+            # Search for files with the same name in the specific folder
+            query = f"name='{filename}' and parents in '{folder_id}' and trashed=false"
+            results = service.files().list(
+                q=query,
+                fields="files(id, name, size, modifiedTime, parents)",
+                pageSize=10
+            ).execute()
+            
+            files = results.get('files', [])
+            if files:
+                # Return the first match (most recent if multiple)
+                return files[0]
+            return None
+            
+        except Exception as e:
+            self.log_error(f"Error checking for duplicate by name: {str(e)}")
+            return None
+    
+    async def _check_duplicate_by_content(self, service, file_hash: str, folder_id: str) -> Optional[Dict[str, Any]]:
+        """Check if file with same content hash already exists in Drive folder"""
+        try:
+            # Search for files with the same content hash (stored in description or custom property)
+            query = f"parents in '{folder_id}' and trashed=false"
+            results = service.files().list(
+                q=query,
+                fields="files(id, name, size, modifiedTime, parents, description)",
+                pageSize=100
+            ).execute()
+            
+            files = results.get('files', [])
+            for file in files:
+                # Check if description contains our hash
+                description = file.get('description', '')
+                if f"hash:{file_hash}" in description:
+                    return file
+            return None
+            
+        except Exception as e:
+            self.log_error(f"Error checking for duplicate by content: {str(e)}")
+            return None
+    
+    async def _check_database_duplicate(self, filename: str, file_path: str) -> Dict[str, Any]:
+        """Check if file already exists in database with upload status"""
+        try:
+            # Check video_transcripts table
+            video_data = await db_manager.get_video_transcript_by_filename(filename)
+            if video_data:
+                return {
+                    'exists': True,
+                    'table': 'video_transcripts',
+                    'data': video_data,
+                    'status': 'Found in video transcripts'
+                }
+            
+            # Check upload_tracking table
+            upload_data = await db_manager.get_upload_tracking_by_filename(filename)
+            if upload_data:
+                return {
+                    'exists': True,
+                    'table': 'upload_tracking',
+                    'data': upload_data,
+                    'status': 'Found in upload tracking'
+                }
+            
+            return {
+                'exists': False,
+                'status': 'No duplicate found in database'
+            }
+            
+        except Exception as e:
+            self.log_error(f"Error checking database duplicate: {str(e)}")
+            return {
+                'exists': False,
+                'status': f'Database check failed: {str(e)}'
+            }
+    
+    def _generate_duplicate_filename(self, original_filename: str, counter: int = 1) -> str:
+        """Generate a unique filename for duplicate files"""
+        name, ext = os.path.splitext(original_filename)
+        return f"{name}_duplicate_{counter}{ext}"
+    
     async def _upload_video_file(self, service, file_path: str, state: Dict) -> Optional[str]:
-        """Upload video file with progress tracking"""
+        """Upload video file with comprehensive duplicate prevention"""
         try:
             filename = os.path.basename(file_path)
             folder_id = self._get_drive_folder_id(service, self.drive_folder)
             if not folder_id:
+                self.log_error(f"No Drive folder ID available for {filename}")
                 return None
             
             current_hash = self._get_file_hash(file_path)
             normalized_path = os.path.normpath(file_path)
             
-            # Check if file exists in Drive first
-            existing_file = self._get_file_by_name(service, filename, folder_id)
+            # Step 1: Check database for existing uploads
+            self.log_step(f"Checking database for duplicates: {filename}")
+            db_check = await self._check_database_duplicate(filename, file_path)
+            if db_check['exists']:
+                self.log_step(f"SKIP: {filename} - {db_check['status']}")
+                return None
             
-            if existing_file:
-                # File exists in Drive, check if we should skip or update
-                if (normalized_path in state and 
-                    state[normalized_path].get('file_hash') == current_hash and 
-                    state[normalized_path].get('upload_status') == 'COMPLETED'):
-                    self.log_step(f"Video {filename} already uploaded with same content. Skipping.")
-                    return state[normalized_path].get('drive_id')
-                else:
-                    self.log_step(f"Updating existing video in Drive: {filename}")
-                    file_id = self._update_existing_file(service, existing_file['id'], file_path)
-            else:
-                # File doesn't exist in Drive, upload new
-                self.log_step(f"Uploading new video to Drive: {filename}")
-                file_id = self._upload_new_file(service, file_path, filename, folder_id)
+            # Step 2: Check Drive for files with same name
+            self.log_step(f"Checking Drive for filename duplicates: {filename}")
+            name_duplicate = await self._check_duplicate_by_name(service, filename, folder_id)
+            if name_duplicate:
+                self.log_step(f"SKIP: {filename} - File with same name already exists in Drive (ID: {name_duplicate['id']})")
+                return None
+            
+            # Step 3: Check Drive for files with same content hash
+            self.log_step(f"Checking Drive for content duplicates: {filename}")
+            content_duplicate = await self._check_duplicate_by_content(service, current_hash, folder_id)
+            if content_duplicate:
+                self.log_step(f"SKIP: {filename} - File with same content already exists in Drive (ID: {content_duplicate['id']})")
+                return None
+            
+            # Step 4: Check if file already exists in state (recent upload)
+            if (normalized_path in state and 
+                state[normalized_path].get('file_hash') == current_hash and 
+                state[normalized_path].get('upload_status') == 'COMPLETED'):
+                self.log_step(f"SKIP: {filename} - Already uploaded in current session")
+                return state[normalized_path].get('drive_id')
+            
+            # Step 5: All checks passed, proceed with upload
+            self.log_step(f"UPLOAD: {filename} - No duplicates found, proceeding with upload")
+            
+            # Upload the file
+            file_id = self._upload_new_file(service, file_path, filename, folder_id)
             
             # Only update state and database if upload was successful
             if file_id:
@@ -223,13 +324,14 @@ class UploadProcessor(BaseProcessor):
                     'smart_name': ''
                 })
                 
+                self.log_step(f"SUCCESS: {filename} uploaded successfully (ID: {file_id})")
                 return file_id
             else:
-                self.log_error(f"Upload failed for {filename} - no file ID returned")
+                self.log_error(f"FAILED: {filename} - Upload failed, no file ID returned")
                 return None
-            
+                
         except Exception as e:
-            self.log_error(f"Error uploading video {file_path}: {str(e)}")
+            self.log_error(f"ERROR: {filename} - Upload failed: {str(e)}")
             return None
     
     def _update_existing_file(self, service, file_id: str, file_path: str) -> Optional[str]:
@@ -282,60 +384,81 @@ class UploadProcessor(BaseProcessor):
             return None
     
     async def _upload_thumbnail_file(self, service, file_path: str, state: Dict) -> Optional[str]:
-        """Upload thumbnail file"""
+        """Upload thumbnail file with comprehensive duplicate prevention"""
         try:
             filename = os.path.basename(file_path)
             current_hash = self._get_file_hash(file_path)
             normalized_path = os.path.normpath(file_path)
             
-            # Check if already uploaded with same content
+            # Step 1: Check database for existing uploads
+            self.log_step(f"Checking database for thumbnail duplicates: {filename}")
+            db_check = await self._check_database_duplicate(filename, file_path)
+            if db_check['exists']:
+                self.log_step(f"SKIP: {filename} - {db_check['status']}")
+                return None
+            
+            # Step 2: Check Drive for files with same name
+            self.log_step(f"Checking Drive for thumbnail filename duplicates: {filename}")
+            name_duplicate = await self._check_duplicate_by_name(service, filename, self.thumbnails_drive_folder_id)
+            if name_duplicate:
+                self.log_step(f"SKIP: {filename} - Thumbnail with same name already exists in Drive (ID: {name_duplicate['id']})")
+                return None
+            
+            # Step 3: Check Drive for files with same content hash
+            self.log_step(f"Checking Drive for thumbnail content duplicates: {filename}")
+            content_duplicate = await self._check_duplicate_by_content(service, current_hash, self.thumbnails_drive_folder_id)
+            if content_duplicate:
+                self.log_step(f"SKIP: {filename} - Thumbnail with same content already exists in Drive (ID: {content_duplicate['id']})")
+                return None
+            
+            # Step 4: Check if file already exists in state (recent upload)
             if (normalized_path in state and 
                 state[normalized_path].get('file_hash') == current_hash and 
                 state[normalized_path].get('upload_status') == 'COMPLETED'):
-                self.log_step(f"Thumbnail {filename} already uploaded with same content. Skipping.")
+                self.log_step(f"SKIP: {filename} - Thumbnail already uploaded in current session")
                 return state[normalized_path].get('drive_id')
             
-            # Check existing in Drive
-            existing = self._get_file_by_name(service, filename, self.thumbnails_drive_folder_id)
+            # Step 5: All checks passed, proceed with upload
+            self.log_step(f"UPLOAD: {filename} - No duplicates found, proceeding with thumbnail upload")
+            
+            # Upload the thumbnail
             media = MediaFileUpload(file_path, resumable=True)
+            meta = {'name': filename, 'parents': [self.thumbnails_drive_folder_id]}
+            uploaded = service.files().create(body=meta, media_body=media, fields='id, name').execute()
+            file_id = uploaded.get('id')
             
-            if existing:
-                service.files().update(fileId=existing['id'], media_body=media).execute()
-                file_id = existing['id']
-                self.log_step(f"Updated thumbnail in Drive: {filename} (ID: {file_id})")
+            if file_id:
+                # Update state
+                state[normalized_path] = {
+                    'filename': filename,
+                    'file_path': normalized_path,
+                    'video_filename': '',
+                    'drive_id': file_id,
+                    'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
+                    'upload_status': 'COMPLETED',
+                    'file_hash': current_hash,
+                    'last_upload': datetime.now().isoformat()
+                }
+                
+                # Update database
+                await db_manager.upsert_thumbnail({
+                    'filename': filename,
+                    'file_path': normalized_path,
+                    'video_filename': '',
+                    'drive_id': file_id,
+                    'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
+                    'upload_status': 'COMPLETED',
+                    'file_hash': current_hash
+                })
+                
+                self.log_step(f"SUCCESS: {filename} thumbnail uploaded successfully (ID: {file_id})")
+                return file_id
             else:
-                meta = {'name': filename, 'parents': [self.thumbnails_drive_folder_id]}
-                uploaded = service.files().create(body=meta, media_body=media, fields='id, name').execute()
-                file_id = uploaded.get('id')
-                self.log_step(f"Uploaded thumbnail to Drive: {filename} (ID: {file_id})")
-            
-            # Update state
-            state[normalized_path] = {
-                'filename': filename,
-                'file_path': normalized_path,
-                'video_filename': '',
-                'drive_id': file_id,
-                'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
-                'upload_status': 'COMPLETED',
-                'file_hash': current_hash,
-                'last_upload': datetime.now().isoformat()
-            }
-            
-            # Update database
-            await db_manager.upsert_thumbnail({
-                'filename': filename,
-                'file_path': normalized_path,
-                'video_filename': '',
-                'drive_id': file_id,
-                'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
-                'upload_status': 'COMPLETED',
-                'file_hash': current_hash
-            })
-            
-            return file_id
+                self.log_error(f"FAILED: {filename} - Thumbnail upload failed, no file ID returned")
+                return None
             
         except Exception as e:
-            self.log_error(f"Error uploading thumbnail {file_path}: {str(e)}")
+            self.log_error(f"ERROR: {filename} - Thumbnail upload failed: {str(e)}")
             return None
     
     def _find_mp4_files(self, folder: str) -> List[str]:

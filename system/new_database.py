@@ -635,6 +635,38 @@ class NewDatabaseManager:
         except Exception as e:
             logger.log_error(f"Error updating thumbnail status by video index: {str(e)}")
             return False
+    
+    async def get_video_transcript_by_filename(self, filename: str) -> Optional[Dict[str, Any]]:
+        """Get video transcript by filename"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute("SELECT * FROM video_transcripts WHERE filename = ?", (filename,))
+                row = await cursor.fetchone()
+                
+                if row:
+                    cursor = await conn.execute("PRAGMA table_info(video_transcripts)")
+                    columns = [col[1] for col in await cursor.fetchall()]
+                    return dict(zip(columns, row))
+                return None
+        except Exception as e:
+            logger.log_error(f"Error getting video transcript by filename: {str(e)}")
+            return None
+    
+    async def get_upload_tracking_by_filename(self, filename: str) -> Optional[Dict[str, Any]]:
+        """Get upload tracking by filename"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute("SELECT * FROM upload_tracking WHERE filename = ?", (filename,))
+                row = await cursor.fetchone()
+                
+                if row:
+                    cursor = await conn.execute("PRAGMA table_info(upload_tracking)")
+                    columns = [col[1] for col in await cursor.fetchall()]
+                    return dict(zip(columns, row))
+                return None
+        except Exception as e:
+            logger.log_error(f"Error getting upload tracking by filename: {str(e)}")
+            return None
 
 # Global instance
 new_db_manager = NewDatabaseManager()
