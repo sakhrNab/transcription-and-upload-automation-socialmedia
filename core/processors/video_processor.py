@@ -66,6 +66,14 @@ class VideoProcessor(BaseProcessor):
         try:
             self.log_step("Initializing video processor")
             
+            # Check GPU availability
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                cuda_version = torch.version.cuda
+                self.log_step(f"GPU available: {gpu_name} (CUDA {cuda_version})")
+            else:
+                self.log_step("No GPU detected, will use CPU for transcription")
+            
             # Ensure required directories exist
             os.makedirs(self.video_output_dir, exist_ok=True)
             os.makedirs(self.audio_output_dir, exist_ok=True)
@@ -172,7 +180,7 @@ class VideoProcessor(BaseProcessor):
                 # Step 7: Update database with transcription
                 video_id = metadata.get('video_id', '')
                 if video_id:
-                    await self._update_video_transcription(video_id, transcript, generated_name, video_path, thumbnail_path)
+                    await self._update_video_transcription(video_id, transcript, generated_name, video_path, thumbnail_path, metadata)
                 
                 self.log_step(f"Complete pipeline successful: {generated_name}")
                 return True
@@ -360,19 +368,23 @@ class VideoProcessor(BaseProcessor):
             raise Exception(f"Audio conversion failed: {str(e)}")
     
     async def _transcribe_audio_with_whisper(self, audio_file: str, index: int) -> str:
-        """Transcribe audio using Whisper with comprehensive logging"""
+        """Transcribe audio using Whisper with comprehensive logging and GPU optimization"""
         self.log_step(f"Starting transcription with {self.whisper_model} model for video {index}")
         
         try:
-            # Clear GPU cache if available
+            # Check GPU availability and set device
+            device = "cuda" if torch.cuda.is_available() else "cpu"
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                self.log_step(f"GPU detected: {torch.cuda.get_device_name(0)} (CUDA {torch.version.cuda})")
+            else:
+                self.log_step("No GPU detected, using CPU")
             
             transcription_start = time.time()
             
-            # Load model
-            model = whisper.load_model(self.whisper_model)
-            self.log_step(f"Loaded {self.whisper_model} model")
+            # Load model with explicit device specification
+            model = whisper.load_model(self.whisper_model, device=device)
+            self.log_step(f"Loaded {self.whisper_model} model on {device.upper()}")
             
             # Check audio duration
             audio_duration = self._get_audio_duration(audio_file)
@@ -391,6 +403,7 @@ class VideoProcessor(BaseProcessor):
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                self.log_step(f"GPU memory cleared after transcription")
             
             if transcript:
                 self.log_step(f"Transcription completed: {len(transcript)} chars, {len(transcript.split())} words")
@@ -631,8 +644,8 @@ TRANSCRIPT:
             self.log_error(f"Error checking existing transcription for {video_id}", e)
             return False
     
-    async def _update_video_transcription(self, video_id: str, transcript: str, smart_name: str, video_path: str, thumbnail_path: str = None):
-        """Update video record with transcription data"""
+    async def _update_video_transcription(self, video_id: str, transcript: str, smart_name: str, video_path: str, thumbnail_path: str = None, metadata: dict = None):
+        """Update video record with transcription data and metadata"""
         try:
             # Find existing video record
             videos = await db_manager.get_all_videos()
@@ -642,36 +655,47 @@ TRANSCRIPT:
                     video_record = video
                     break
             
-            if video_record:
-                # Update existing record
-                await db_manager.upsert_video({
-                    'filename': video_record.get('filename', ''),
-                    'file_path': video_path,
-                    'url': video_record.get('url', ''),
-                    'drive_id': video_record.get('drive_id', ''),
-                    'drive_url': video_record.get('drive_url', ''),
-                    'upload_status': video_record.get('upload_status', 'PENDING'),
-                    'transcription_status': 'COMPLETED',
-                    'transcription_text': transcript,
-                    'smart_name': smart_name,
-                    'file_hash': video_record.get('file_hash', '')
+            # Prepare video data with metadata
+            video_data = {
+                'filename': video_record.get('filename', f"{video_id}.mp4") if video_record else f"{video_id}.mp4",
+                'file_path': video_path,
+                'url': video_record.get('url', '') if video_record else '',
+                'drive_id': video_record.get('drive_id', '') if video_record else '',
+                'drive_url': video_record.get('drive_url', '') if video_record else '',
+                'upload_status': video_record.get('upload_status', 'PENDING') if video_record else 'PENDING',
+                'transcription_status': 'COMPLETED',
+                'transcription_text': transcript,
+                'smart_name': smart_name,
+                'file_hash': video_record.get('file_hash', '') if video_record else ''
+            }
+            
+            # Add metadata if available
+            if metadata:
+                video_data.update({
+                    'video_id': metadata.get('video_id', video_id),
+                    'title': metadata.get('title', ''),
+                    'description': metadata.get('description', ''),
+                    'username': metadata.get('username', ''),
+                    'uploader_id': metadata.get('uploader_id', ''),
+                    'channel_id': metadata.get('channel_id', ''),
+                    'channel_url': metadata.get('channel_url', ''),
+                    'platform': metadata.get('platform', ''),
+                    'duration': metadata.get('duration', 0),
+                    'width': metadata.get('width'),
+                    'height': metadata.get('height'),
+                    'fps': metadata.get('fps'),
+                    'format_id': metadata.get('format_id', ''),
+                    'view_count': metadata.get('view_count'),
+                    'like_count': metadata.get('like_count'),
+                    'comment_count': metadata.get('comment_count'),
+                    'upload_date': metadata.get('upload_date', ''),
+                    'thumbnail_url': metadata.get('thumbnail_url', ''),
+                    'webpage_url': metadata.get('webpage_url', ''),
+                    'extractor': metadata.get('extractor', '')
                 })
-                self.log_step(f"Updated video record with transcription")
-            else:
-                # Create new record
-                await db_manager.upsert_video({
-                    'filename': f"{video_id}.mp4",
-                    'file_path': video_path,
-                    'url': '',
-                    'drive_id': '',
-                    'drive_url': '',
-                    'upload_status': 'PENDING',
-                    'transcription_status': 'COMPLETED',
-                    'transcription_text': transcript,
-                    'smart_name': smart_name,
-                    'file_hash': ''
-                })
-                self.log_step(f"Created new video record with transcription")
+            
+            await db_manager.upsert_video(video_data)
+            self.log_step(f"Updated video record with transcription and metadata")
             
             # Update thumbnail if provided
             if thumbnail_path:

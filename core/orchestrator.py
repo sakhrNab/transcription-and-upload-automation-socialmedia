@@ -25,6 +25,7 @@ from core.processors.upload_processor import UploadProcessor
 from core.processors.thumbnail_processor import ThumbnailProcessor
 from core.processors.aiwaverider_processor import AIWaveriderProcessor
 from core.processors.sheets_processor import SheetsProcessor
+from core.processors.excel_processor import ExcelProcessor
 
 
 class SocialMediaOrchestrator:
@@ -37,13 +38,15 @@ class SocialMediaOrchestrator:
         self.thumbnail_processor = ThumbnailProcessor()
         self.aiwaverider_processor = AIWaveriderProcessor()
         self.sheets_processor = SheetsProcessor()
+        self.excel_processor = ExcelProcessor()
         
         self.processing_pipeline = [
             self.video_processor,
             self.upload_processor,
             self.thumbnail_processor,
             self.aiwaverider_processor,
-            self.sheets_processor
+            self.sheets_processor,
+            self.excel_processor
         ]
     
     async def initialize(self):
@@ -66,7 +69,10 @@ class SocialMediaOrchestrator:
             # Initialize all processors
             for processor in self.processing_pipeline:
                 await processor.initialize()
-                logger.log_step(f"Initialized {processor.__class__.__name__}")
+                if hasattr(processor, 'drive_folder'):
+                    logger.log_step(f"Initialized {processor.__class__.__name__} with drive_folder: {processor.drive_folder}")
+                else:
+                    logger.log_step(f"Initialized {processor.__class__.__name__}")
             
             logger.log_step("All components initialized successfully")
             return True
@@ -119,6 +125,13 @@ class SocialMediaOrchestrator:
             sheets_result = await self.sheets_processor.update_master_sheet()
             if not sheets_result:
                 logger.log_error("Sheets update failed")
+                return False
+            
+            # Step 5: Excel Generation and Upload
+            logger.log_step("Step 5: Excel file generation and upload")
+            excel_result = await self.excel_processor.generate_and_upload_excel()
+            if not excel_result:
+                logger.log_error("Excel generation and upload failed")
                 return False
             
             logger.log_step("Pipeline processing completed successfully")

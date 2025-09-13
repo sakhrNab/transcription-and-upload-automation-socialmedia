@@ -70,7 +70,28 @@ class DatabaseManager:
                     aiwaverider_status TEXT DEFAULT 'PENDING',
                     file_hash TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    -- Video metadata
+                    video_id TEXT,
+                    title TEXT,
+                    description TEXT,
+                    username TEXT,
+                    uploader_id TEXT,
+                    channel_id TEXT,
+                    channel_url TEXT,
+                    platform TEXT,
+                    duration INTEGER,
+                    width INTEGER,
+                    height INTEGER,
+                    fps REAL,
+                    format_id TEXT,
+                    view_count INTEGER,
+                    like_count INTEGER,
+                    comment_count INTEGER,
+                    upload_date TEXT,
+                    thumbnail_url TEXT,
+                    webpage_url TEXT,
+                    extractor TEXT
                 )
             """)
             
@@ -163,6 +184,21 @@ class DatabaseManager:
                 await conn.execute("ALTER TABLE thumbnails ADD COLUMN file_hash TEXT")
             except Exception:
                 pass  # Column already exists
+            
+            # Add video metadata columns (migration)
+            metadata_columns = [
+                "video_id TEXT", "title TEXT", "description TEXT", "username TEXT",
+                "uploader_id TEXT", "channel_id TEXT", "channel_url TEXT", "platform TEXT",
+                "duration INTEGER", "width INTEGER", "height INTEGER", "fps REAL",
+                "format_id TEXT", "view_count INTEGER", "like_count INTEGER", "comment_count INTEGER",
+                "upload_date TEXT", "thumbnail_url TEXT", "webpage_url TEXT", "extractor TEXT"
+            ]
+            
+            for column in metadata_columns:
+                try:
+                    await conn.execute(f"ALTER TABLE videos ADD COLUMN {column}")
+                except Exception:
+                    pass  # Column already exists
             
             await conn.commit()
         finally:
