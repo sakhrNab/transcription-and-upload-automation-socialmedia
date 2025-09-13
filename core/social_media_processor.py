@@ -457,6 +457,66 @@ class MasterSheetManager:
             logger.log_step("Local backup saved successfully")
         except Exception as e:
             logger.log_error(f"Error saving local backup: {str(e)}")
+    
+    def cleanup_duplicates(self):
+        """Remove duplicate entries from the sheet based on filename"""
+        try:
+            if not self.service:
+                logger.log_step("Cannot cleanup duplicates - no Google Sheets service")
+                return
+            
+            # Get all data from the sheet
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=MASTER_SHEET_ID,
+                range=f'{MASTER_SHEET_NAME}!A1:S1000'
+            ).execute()
+            
+            values = result.get('values', [])
+            if len(values) <= 1:  # Only headers or empty
+                logger.log_step("No data to cleanup")
+                return
+            
+            # Find duplicates by filename (column B)
+            seen_filenames = {}
+            rows_to_keep = [values[0]]  # Keep header row
+            duplicates_found = []
+            
+            for idx, row in enumerate(values[1:], start=2):
+                if row and len(row) > 1:
+                    filename = row[1]  # Column B is filename
+                    if filename in seen_filenames:
+                        duplicates_found.append(idx)
+                        logger.log_step(f"Found duplicate: {filename} at row {idx}")
+                    else:
+                        seen_filenames[filename] = idx
+                        rows_to_keep.append(row)
+            
+            if not duplicates_found:
+                logger.log_step("No duplicates found")
+                return
+            
+            # Clear the sheet and write back only unique rows
+            # First, clear all data
+            self.service.spreadsheets().values().clear(
+                spreadsheetId=MASTER_SHEET_ID,
+                range=f'{MASTER_SHEET_NAME}!A1:S1000'
+            ).execute()
+            
+            # Write back unique rows
+            if rows_to_keep:
+                body = {'values': rows_to_keep}
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=MASTER_SHEET_ID,
+                    range=f'{MASTER_SHEET_NAME}!A1',
+                    valueInputOption='USER_ENTERED',
+                    body=body
+                ).execute()
+                
+                logger.log_step(f"Cleaned up {len(duplicates_found)} duplicate entries")
+                logger.log_step(f"Sheet now has {len(rows_to_keep)-1} unique entries")
+            
+        except Exception as e:
+            logger.log_error(f"Error cleaning up duplicates: {str(e)}")
 
     def _upload_thumbnail_image(self, content_info: Dict[str, Any], row_number: int):
         """Upload thumbnail image to Google Sheets using Drive API"""
@@ -643,19 +703,12 @@ class MasterSheetManager:
                         if row and len(row) > 1:
                             existing_filenames[row[1]] = idx
                 
-                # Prepare all rows for batch update
-                all_rows = []
-                next_row = len(values) + 1 if values else 2
+                # Separate existing and new entries
+                updates_to_make = []
+                new_entries = []
                 
                 for content_info in content_list:
                     filename = content_info['filename']
-                    
-                    # Determine row number
-                    if filename in existing_filenames:
-                        row_number = existing_filenames[filename]
-                    else:
-                        row_number = next_row
-                        next_row += 1
                     
                     # Prepare row data
                     row_data = []
@@ -665,25 +718,42 @@ class MasterSheetManager:
                             value = STATUS_PENDING
                         row_data.append(value)
                     
-                    all_rows.append(row_data)
+                    if filename in existing_filenames:
+                        # Update existing row
+                        row_number = existing_filenames[filename]
+                        updates_to_make.append((row_number, row_data, filename))
+                    else:
+                        # New entry
+                        new_entries.append(row_data)
                 
-                # Use batch update with values API
-                if all_rows:
-                    # Get the range for all rows
-                    start_row = 2 if not values else len(values) + 1
-                    end_row = start_row + len(all_rows)
-                    range_name = f'{MASTER_SHEET_NAME}!A{start_row}:S{end_row}'
+                # Update existing entries individually
+                for row_number, row_data, filename in updates_to_make:
+                    range_name = f'{MASTER_SHEET_NAME}!A{row_number}:S{row_number}'
+                    self.service.spreadsheets().values().update(
+                        spreadsheetId=MASTER_SHEET_ID,
+                        range=range_name,
+                        valueInputOption='USER_ENTERED',
+                        body={'values': [row_data]}
+                    ).execute()
+                    logger.log_step(f"Updated existing row {row_number} for {filename}")
+                
+                # Add new entries in batch
+                if new_entries:
+                    next_row = len(values) + 1 if values else 2
+                    end_row = next_row + len(new_entries) - 1
+                    range_name = f'{MASTER_SHEET_NAME}!A{next_row}:S{end_row}'
                     
-                    # Update all rows at once
-                    body = {'values': all_rows}
+                    body = {'values': new_entries}
                     self.service.spreadsheets().values().update(
                         spreadsheetId=MASTER_SHEET_ID,
                         range=range_name,
                         valueInputOption='USER_ENTERED',
                         body=body
                     ).execute()
-                    
-                    logger.log_step(f"Batch updated {len(content_list)} entries in Google Sheets")
+                    logger.log_step(f"Added {len(new_entries)} new entries to Google Sheets")
+                
+                total_updates = len(updates_to_make) + len(new_entries)
+                logger.log_step(f"Processed {total_updates} total entries: {len(updates_to_make)} updates, {len(new_entries)} new")
                 
             except Exception as e:
                 logger.log_error(f"Error batch updating online sheet: {str(e)}")
@@ -969,6 +1039,12 @@ async def update_master_sheet_from_database():
         # Update the master sheet
         if content_list:
             sheet_manager = MasterSheetManager()
+            
+            # First, cleanup any existing duplicates
+            logger.log_step("Cleaning up duplicate entries in Google Sheets...")
+            sheet_manager.cleanup_duplicates()
+            
+            # Then update with current data
             sheet_manager.batch_update_content_status(content_list)
             logger.log_step(f"Updated master sheet with {len(content_list)} entries from database")
             
