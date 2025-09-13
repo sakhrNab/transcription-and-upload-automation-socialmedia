@@ -1145,5 +1145,26 @@ def main():
     
     print(f"\nProcessing complete! Check logs in {LOGS_DIR} for detailed session information.")
 
+    # After processing, optionally upload thumbnails using the thumbnail uploader script
+    try:
+        import subprocess, sys
+        uploader = os.path.join(os.path.dirname(__file__), 'upload-thumbnails-to-google.py')
+        if os.path.exists(uploader):
+            logger.log_step(0, 'THUMBNAIL_UPLOAD_START', {'message': 'Invoking thumbnail uploader'})
+            # Use same Python executable (venv) to run the uploader
+            proc = subprocess.run([sys.executable, uploader], capture_output=True, text=True)
+            logger.log_step(0, 'THUMBNAIL_UPLOAD_FINISHED', {
+                'returncode': proc.returncode,
+                'stdout': proc.stdout[:1000],
+                'stderr': proc.stderr[:1000]
+            })
+            print(proc.stdout)
+            if proc.returncode != 0:
+                print('Thumbnail uploader exited with non-zero code. Check logs for details.')
+        else:
+            logger.log_step(0, 'THUMBNAIL_UPLOADER_MISSING', {'message': 'upload-thumbnails-to-google.py not found'})
+    except Exception as e:
+        logger.log_error(0, f'Failed to invoke thumbnail uploader: {e}')
+
 if __name__ == '__main__':
     main()
