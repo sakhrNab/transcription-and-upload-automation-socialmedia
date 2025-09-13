@@ -47,7 +47,13 @@ class DatabaseManager:
     
     async def _create_tables(self):
         """Create database tables"""
-        async with self.get_connection() as conn:
+        # Create a direct connection for table creation
+        conn = await aiosqlite.connect(
+            self.db_path,
+            timeout=30.0,
+            check_same_thread=False
+        )
+        try:
             # Videos table
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS videos (
@@ -61,6 +67,8 @@ class DatabaseManager:
                     transcription_status TEXT DEFAULT 'PENDING',
                     transcription_text TEXT,
                     smart_name TEXT,
+                    aiwaverider_status TEXT DEFAULT 'PENDING',
+                    file_hash TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -76,6 +84,8 @@ class DatabaseManager:
                     drive_id TEXT,
                     drive_url TEXT,
                     upload_status TEXT DEFAULT 'PENDING',
+                    aiwaverider_status TEXT DEFAULT 'PENDING',
+                    file_hash TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -133,13 +143,39 @@ class DatabaseManager:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(metric_name)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp)")
             
+            # Add missing columns if they don't exist (migration)
+            try:
+                await conn.execute("ALTER TABLE videos ADD COLUMN aiwaverider_status TEXT DEFAULT 'PENDING'")
+            except Exception:
+                pass  # Column already exists
+            
+            try:
+                await conn.execute("ALTER TABLE thumbnails ADD COLUMN aiwaverider_status TEXT DEFAULT 'PENDING'")
+            except Exception:
+                pass  # Column already exists
+            
+            try:
+                await conn.execute("ALTER TABLE videos ADD COLUMN file_hash TEXT")
+            except Exception:
+                pass  # Column already exists
+            
+            try:
+                await conn.execute("ALTER TABLE thumbnails ADD COLUMN file_hash TEXT")
+            except Exception:
+                pass  # Column already exists
+            
             await conn.commit()
+        finally:
+            await conn.close()
     
     @asynccontextmanager
     async def get_connection(self):
         """Get database connection from pool"""
         if self._closed:
             raise RuntimeError("Database manager is closed")
+        
+        if not self._initialized:
+            raise RuntimeError("Database manager not initialized")
         
         conn = None
         try:
@@ -443,6 +479,158 @@ class DatabaseManager:
             cursor = await conn.execute(
                 "SELECT * FROM thumbnails WHERE upload_status = ?", (status,)
             )
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_all_thumbnails(self) -> List[Dict[str, Any]]:
+        """Get all thumbnails"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute("SELECT * FROM thumbnails")
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_videos_by_video_id(self, video_id: str) -> List[Dict[str, Any]]:
+        """Get videos by video ID"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM videos WHERE filename LIKE ?", (f"%{video_id}%",)
+            )
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def update_video_status(self, video_id: int, status: str, drive_id: str = None):
+        """Update video status"""
+        async with self.get_connection() as conn:
+            if drive_id:
+                await conn.execute(
+                    "UPDATE videos SET upload_status = ?, drive_id = ?, updated_at = ? WHERE id = ?",
+                    (status, drive_id, datetime.now().isoformat(), video_id)
+                )
+            else:
+                await conn.execute(
+                    "UPDATE videos SET upload_status = ?, updated_at = ? WHERE id = ?",
+                    (status, datetime.now().isoformat(), video_id)
+                )
+            await conn.commit()
+    
+    async def update_thumbnail_status(self, thumbnail_id: int, status: str, drive_id: str = None):
+        """Update thumbnail status"""
+        async with self.get_connection() as conn:
+            if drive_id:
+                await conn.execute(
+                    "UPDATE thumbnails SET upload_status = ?, drive_id = ?, updated_at = ? WHERE id = ?",
+                    (status, drive_id, datetime.now().isoformat(), thumbnail_id)
+                )
+            else:
+                await conn.execute(
+                    "UPDATE thumbnails SET upload_status = ?, updated_at = ? WHERE id = ?",
+                    (status, datetime.now().isoformat(), thumbnail_id)
+                )
+            await conn.commit()
+    
+    async def update_video_aiwaverider_status(self, video_id: int, status: str):
+        """Update video AIWaverider upload status"""
+        async with self.get_connection() as conn:
+            await conn.execute(
+                "UPDATE videos SET aiwaverider_status = ?, updated_at = ? WHERE id = ?",
+                (status, datetime.now().isoformat(), video_id)
+            )
+            await conn.commit()
+    
+    async def update_thumbnail_aiwaverider_status(self, thumbnail_id: int, status: str):
+        """Update thumbnail AIWaverider upload status"""
+        async with self.get_connection() as conn:
+            await conn.execute(
+                "UPDATE thumbnails SET aiwaverider_status = ?, updated_at = ? WHERE id = ?",
+                (status, datetime.now().isoformat(), thumbnail_id)
+            )
+            await conn.commit()
+    
+    async def get_videos_by_video_id(self, video_id: str) -> List[Dict[str, Any]]:
+        """Get videos by video ID"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM videos WHERE filename LIKE ?", (f"%{video_id}%",)
+            )
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def update_video_status(self, video_id: int, status: str, drive_id: str = None):
+        """Update video status"""
+        async with self.get_connection() as conn:
+            if drive_id:
+                await conn.execute(
+                    "UPDATE videos SET upload_status = ?, drive_id = ?, updated_at = ? WHERE id = ?",
+                    (status, drive_id, datetime.now().isoformat(), video_id)
+                )
+            else:
+                await conn.execute(
+                    "UPDATE videos SET upload_status = ?, updated_at = ? WHERE id = ?",
+                    (status, datetime.now().isoformat(), video_id)
+                )
+            await conn.commit()
+    
+    async def update_thumbnail_status(self, thumbnail_id: int, status: str, drive_id: str = None):
+        """Update thumbnail status"""
+        async with self.get_connection() as conn:
+            if drive_id:
+                await conn.execute(
+                    "UPDATE thumbnails SET upload_status = ?, drive_id = ?, updated_at = ? WHERE id = ?",
+                    (status, drive_id, datetime.now().isoformat(), thumbnail_id)
+                )
+            else:
+                await conn.execute(
+                    "UPDATE thumbnails SET upload_status = ?, updated_at = ? WHERE id = ?",
+                    (status, datetime.now().isoformat(), thumbnail_id)
+                )
+            await conn.commit()
+    
+    async def update_video_aiwaverider_status(self, video_id: int, status: str):
+        """Update video AIWaverider upload status"""
+        async with self.get_connection() as conn:
+            await conn.execute(
+                "UPDATE videos SET aiwaverider_status = ?, updated_at = ? WHERE id = ?",
+                (status, datetime.now().isoformat(), video_id)
+            )
+            await conn.commit()
+    
+    async def update_thumbnail_aiwaverider_status(self, thumbnail_id: int, status: str):
+        """Update thumbnail AIWaverider upload status"""
+        async with self.get_connection() as conn:
+            await conn.execute(
+                "UPDATE thumbnails SET aiwaverider_status = ?, updated_at = ? WHERE id = ?",
+                (status, datetime.now().isoformat(), thumbnail_id)
+            )
+            await conn.commit()
+    
+    async def get_videos_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """Get videos by status"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM videos WHERE upload_status = ?", (status,)
+            )
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_thumbnails_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """Get thumbnails by status"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM thumbnails WHERE upload_status = ?", (status,)
+            )
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_all_videos(self) -> List[Dict[str, Any]]:
+        """Get all videos"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute("SELECT * FROM videos")
             rows = await cursor.fetchall()
             columns = [description[0] for description in cursor.description]
             return [dict(zip(columns, row)) for row in rows]
