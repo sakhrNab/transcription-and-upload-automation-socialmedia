@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 from system.config import settings
 
 # Core libraries
@@ -450,6 +450,8 @@ class VideoProcessor(BaseProcessor):
                 filename = f"{seq_num:02d}_{username}_{video_id}{ext}"
                 filepath = os.path.join(self.thumbnails_dir, filename)
                 filepath = self._get_unique_filename(filepath)
+                # Normalize path separators for consistency
+                filepath = os.path.normpath(filepath)
                 
                 with open(filepath, 'wb') as f:
                     f.write(response.content)
@@ -842,6 +844,89 @@ TRANSCRIPT:
         except Exception as e:
             self.log_error(f"Error updating video transcription: {str(e)}")
     
+    async def download_video_only(self, url: str, index: int) -> bool:
+        """Download video and extract metadata only (no transcription)"""
+        try:
+            self.log_step(f"Starting download-only processing for video {index}")
+            
+            # Step 1: Download video and extract metadata
+            video_path, metadata, raw_info = await self._download_video_and_metadata(url, index)
+            
+            # Step 2: Download thumbnail
+            thumbnail_path = await self._download_thumbnail(
+                metadata.get('thumbnail_url'), 
+                metadata.get('video_id'), 
+                metadata.get('username'),
+                index
+            )
+            
+            # Log thumbnail path for debugging
+            if thumbnail_path:
+                self.log_step(f"Thumbnail downloaded to: {thumbnail_path}")
+            else:
+                self.log_step(f"No thumbnail downloaded for video {index}")
+            
+            # Step 3: Generate smart video name
+            generated_name = await self._generate_smart_video_name(
+                metadata.get('title', ''), 
+                metadata.get('description', ''),
+                index
+            )
+            
+            # Step 4: Save to database (without transcription data)
+            video_data = {
+                'video_id': metadata.get('video_id', ''),
+                'filename': os.path.basename(video_path),
+                'file_path': video_path,
+                'url': url,
+                'title': metadata.get('title', ''),
+                'description': metadata.get('description', ''),
+                'username': metadata.get('username', ''),
+                'uploader_id': metadata.get('uploader_id', ''),
+                'channel_id': metadata.get('channel_id', ''),
+                'channel_url': metadata.get('channel_url', ''),
+                'platform': metadata.get('platform', ''),
+                'duration': metadata.get('duration', 0),
+                'width': metadata.get('width', 0),
+                'height': metadata.get('height', 0),
+                'fps': metadata.get('fps', 0),
+                'format_id': metadata.get('format_id', ''),
+                'view_count': metadata.get('view_count', 0),
+                'like_count': metadata.get('like_count', 0),
+                'comment_count': metadata.get('comment_count', 0),
+                'upload_date': metadata.get('upload_date', ''),
+                'thumbnail_url': metadata.get('thumbnail_url', ''),
+                'webpage_url': metadata.get('webpage_url', ''),
+                'extractor': metadata.get('extractor', ''),
+                'transcription_text': '',  # Empty for download-only
+                'transcription_status': 'PENDING',  # Will be processed later
+                'smart_name': generated_name,
+                'thumbnail_file_path': thumbnail_path if thumbnail_path else '',
+                'video_file_size_mb': metadata.get('file_size_mb', 0),
+                'transcript_word_count': 0,  # Will be filled during transcription
+                'processing_time_seconds': 0,  # Will be filled during transcription
+                'notes': 'Downloaded only - transcription pending',
+                'error_details': ''
+            }
+            
+            # Debug: Log the thumbnail path being saved
+            self.log_step(f"Saving thumbnail path to database: {video_data.get('thumbnail_file_path', 'EMPTY')}")
+            
+            # Save to database
+            success = await db_manager.upsert_video_transcript(video_data)
+            if success:
+                self.log_step(f"Video {index} data saved to database")
+                self.processed_count += 1
+                return True
+            else:
+                self.log_error(f"Failed to save video {index} data to database")
+                return False
+                
+        except Exception as e:
+            self.log_error(f"Error in download-only processing for video {index}: {str(e)}")
+            self.failed_count += 1
+            return False
+
     async def cleanup(self) -> None:
         """Cleanup video processor resources"""
         try:

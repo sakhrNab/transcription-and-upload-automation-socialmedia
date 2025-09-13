@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 from system.config import settings
 from system.error_recovery import retry_async, RetryConfig, GOOGLE_API_RETRY_CONFIG, CircuitBreaker
 
@@ -497,6 +497,53 @@ class SheetsProcessor(BaseProcessor):
             
         except Exception as e:
             self.log_error(f"Error adding new entries to sheet", e)
+    
+    async def update_sheets_after_download(self, video_index: int) -> bool:
+        """Update sheets after download-only processing"""
+        try:
+            self.log_step(f"Updating sheets for video {video_index}")
+            
+            # Get video data from database
+            video_data = await db_manager.get_video_transcript_by_index(video_index)
+            if not video_data:
+                self.log_error(f"Video data not found for index {video_index}")
+                return False
+            
+            # Prepare content info for sheets
+            content_info = {
+                'filename': video_data.get('filename', ''),
+                'title': video_data.get('title', ''),
+                'description': video_data.get('description', ''),
+                'username': video_data.get('username', ''),
+                'platform': video_data.get('platform', ''),
+                'duration': video_data.get('duration', 0),
+                'view_count': video_data.get('view_count', 0),
+                'like_count': video_data.get('like_count', 0),
+                'comment_count': video_data.get('comment_count', 0),
+                'upload_date': video_data.get('upload_date', ''),
+                'video_path': video_data.get('file_path', ''),
+                'thumbnail_path': video_data.get('thumbnail_file_path', ''),
+                'transcript_path': '',  # Empty for download-only
+                'transcript': '',  # Empty for download-only
+                'word_count': 0,  # Empty for download-only
+                'source_url': video_data.get('webpage_url', ''),
+                'status': 'Downloaded',  # Status for download-only
+                'processing_time': 0,  # Empty for download-only
+                'notes': 'Downloaded only - transcription pending',
+                'error_details': ''
+            }
+            
+            # Update the sheet
+            await self._update_single_entry(content_info)
+            
+            self.log_step(f"Successfully updated sheets for video {video_index}")
+            self.updated_count += 1
+            return True
+            
+        except Exception as e:
+            self.log_error(f"Error updating sheets for video {video_index}", e)
+            self.failed_count += 1
+            return False
     
     async def _save_tracking_data_locally(self, content_list: List[Dict]) -> None:
         """Save tracking data locally as backup"""

@@ -15,7 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from system.processor_logger import processor_logger as logger
 from system.config import settings
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 from system.queue_processor import queue_processor
 from system.health_metrics import metrics_collector
 

@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 from system.config import settings
 
 # Google Drive API
@@ -196,32 +196,37 @@ class UploadProcessor(BaseProcessor):
                 self.log_step(f"Uploading new video to Drive: {filename}")
                 file_id = self._upload_new_file(service, file_path, filename, folder_id)
             
-            # Update state
-            state[normalized_path] = {
-                'filename': filename,
-                'file_path': normalized_path,
-                'drive_id': file_id,
-                'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
-                'upload_status': 'COMPLETED',
-                'file_hash': current_hash,
-                'last_upload': datetime.now().isoformat()
-            }
-            
-            # Update database
-            await db_manager.upsert_video({
-                'filename': filename,
-                'file_path': normalized_path,
-                'drive_id': file_id,
-                'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
-                'upload_status': 'COMPLETED',
-                'file_hash': current_hash,
-                'url': '',
-                'transcription_status': 'PENDING',
-                'transcription_text': '',
-                'smart_name': ''
-            })
-            
-            return file_id
+            # Only update state and database if upload was successful
+            if file_id:
+                # Update state
+                state[normalized_path] = {
+                    'filename': filename,
+                    'file_path': normalized_path,
+                    'drive_id': file_id,
+                    'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
+                    'upload_status': 'COMPLETED',
+                    'file_hash': current_hash,
+                    'last_upload': datetime.now().isoformat()
+                }
+                
+                # Update database
+                await db_manager.upsert_video({
+                    'filename': filename,
+                    'file_path': normalized_path,
+                    'drive_id': file_id,
+                    'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
+                    'upload_status': 'COMPLETED',
+                    'file_hash': current_hash,
+                    'url': '',
+                    'transcription_status': 'PENDING',
+                    'transcription_text': '',
+                    'smart_name': ''
+                })
+                
+                return file_id
+            else:
+                self.log_error(f"Upload failed for {filename} - no file ID returned")
+                return None
             
         except Exception as e:
             self.log_error(f"Error uploading video {file_path}: {str(e)}")
@@ -239,6 +244,41 @@ class UploadProcessor(BaseProcessor):
             return file.get('id')
         except Exception as e:
             self.log_error(f"Error updating file: {str(e)}")
+            return None
+    
+    def _upload_new_file(self, service, file_path: str, filename: str, folder_id: str) -> Optional[str]:
+        """Upload new file to Drive"""
+        try:
+            # Check if file exists and has content
+            if not os.path.exists(file_path):
+                self.log_error(f"File does not exist: {file_path}")
+                return None
+            
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                self.log_error(f"File is empty: {file_path}")
+                return None
+            
+            media = MediaFileUpload(file_path, resumable=True)
+            file_metadata = {
+                'name': filename,
+                'parents': [folder_id]
+            }
+            file = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+            
+            file_id = file.get('id')
+            if not file_id:
+                self.log_error(f"No file ID returned from Google Drive for: {filename}")
+                return None
+                
+            self.log_step(f"Uploaded new file: {filename} (ID: {file_id})")
+            return file_id
+        except Exception as e:
+            self.log_error(f"Error uploading new file: {str(e)}")
             return None
     
     async def _upload_thumbnail_file(self, service, file_path: str, state: Dict) -> Optional[str]:

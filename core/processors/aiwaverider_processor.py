@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 from system.config import settings
 from system.error_recovery import retry_async, RetryConfig, AIWAVERIDER_RETRY_CONFIG, CircuitBreaker
 

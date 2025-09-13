@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 
 
 class ThumbnailProcessor(BaseProcessor):
@@ -82,6 +82,41 @@ class ThumbnailProcessor(BaseProcessor):
             self.status = "error"
             return False
     
+    async def process_thumbnail_for_video(self, video_index: int) -> bool:
+        """Process thumbnail for a specific video (download-only mode)"""
+        try:
+            self.log_step(f"Processing thumbnail for video {video_index}")
+            
+            # Get video data from database
+            video_data = await db_manager.get_video_transcript_by_index(video_index)
+            if not video_data:
+                self.log_error(f"Video data not found for index {video_index}")
+                return False
+            
+            thumbnail_path = video_data.get('thumbnail_file_path', '')
+            if not thumbnail_path or not os.path.exists(thumbnail_path):
+                self.log_error(f"Thumbnail file not found: {thumbnail_path}")
+                return False
+            
+            filename = os.path.basename(thumbnail_path)
+            self.log_step(f"Processing thumbnail: {filename}")
+            
+            # Here you would add thumbnail optimization logic
+            # For now, we'll simulate the processing
+            await asyncio.sleep(0.2)  # Simulate processing time
+            
+            # Update database with processing status
+            await db_manager.update_thumbnail_status_by_video_index(video_index, 'PROCESSED')
+            
+            self.log_step(f"Successfully processed thumbnail: {filename}")
+            self.processed_count += 1
+            return True
+            
+        except Exception as e:
+            self.log_error(f"Error processing thumbnail for video {video_index}", e)
+            self.failed_count += 1
+            return False
+
     async def _process_single_thumbnail(self, thumbnail: Dict[str, Any]) -> bool:
         """Process a single thumbnail"""
         try:

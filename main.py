@@ -15,7 +15,7 @@ from typing import List
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from core.orchestrator import SocialMediaOrchestrator
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 
 
 async def main(urls: List[str] = None):
@@ -71,15 +71,17 @@ async def main(urls: List[str] = None):
             # Fallback to urls.txt or default
             if os.path.exists("urls.txt"):
                 with open("urls.txt", 'r', encoding='utf-8') as f:
-                    sample_urls = [line.strip() for line in f if line.strip()]
-                print(f"📝 Loaded {len(sample_urls)} URLs from urls.txt")
+                    all_urls = [line.strip() for line in f if line.strip()]
+                # Limit to 5 videos max for main processing
+                sample_urls = all_urls[:5]
+                print(f"📝 Loaded {len(all_urls)} URLs from urls.txt, processing first 5")
             else:
                 sample_urls = [
                     "https://www.youtube.com/watch?v=dQw4w9WgXcQ",  # Fallback sample URL
                 ]
                 print("📝 Using fallback sample URL")
         
-        print(f"📝 Processing {len(sample_urls)} URLs...")
+        print(f"📝 Processing {len(sample_urls)} URLs (max 5 for main processing)...")
         success = await orchestrator.process_urls(sample_urls)
         
         if success:
@@ -141,8 +143,10 @@ if __name__ == "__main__":
                 # URLs from file
                 if os.path.exists(args.urls_file):
                     with open(args.urls_file, 'r', encoding='utf-8') as f:
-                        urls = [line.strip() for line in f if line.strip()]
-                    print(f"📝 Loaded {len(urls)} URLs from {args.urls_file}")
+                        all_urls = [line.strip() for line in f if line.strip()]
+                    # Limit to 5 videos max for main processing
+                    urls = all_urls[:5]
+                    print(f"📝 Loaded {len(all_urls)} URLs from {args.urls_file}, processing first 5")
                 else:
                     print(f"❌ URLs file not found: {args.urls_file}")
                     sys.exit(1)
@@ -150,8 +154,10 @@ if __name__ == "__main__":
                 # Default to urls.txt if it exists
                 if os.path.exists('urls.txt'):
                     with open('urls.txt', 'r', encoding='utf-8') as f:
-                        urls = [line.strip() for line in f if line.strip()]
-                    print(f"📝 Loaded {len(urls)} URLs from urls.txt")
+                        all_urls = [line.strip() for line in f if line.strip()]
+                    # Limit to 5 videos max for main processing
+                    urls = all_urls[:5]
+                    print(f"📝 Loaded {len(all_urls)} URLs from urls.txt, processing first 5")
                 else:
                     print("❌ No URLs provided. Use --urls, --urls-file, or create urls.txt")
                     sys.exit(1)
