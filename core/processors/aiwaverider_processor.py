@@ -22,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from core.processors.base_processor import BaseProcessor
 from system.database import db_manager
 from system.config import settings
+from system.error_recovery import retry_async, RetryConfig, AIWAVERIDER_RETRY_CONFIG, CircuitBreaker
 
 # HTTP requests
 import requests
@@ -52,6 +53,13 @@ class AIWaveriderProcessor(BaseProcessor):
         # Cache directory
         self.cache_dir = "data/cache"
         os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # Circuit breaker for AIWaverider API
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=5,
+            timeout=60,
+            expected_exception=Exception
+        )
     
     async def initialize(self) -> bool:
         """Initialize AIWaverider processor"""
@@ -253,16 +261,64 @@ class AIWaveriderProcessor(BaseProcessor):
             self.log_error(f"Error getting fresh file list from AIWaverider Drive: {str(e)}")
             return set()
     
+    async def _check_file_exists_on_aiwaverider(self, filename: str, folder_path: str) -> bool:
+        """Check if file already exists on AIWaverider Drive"""
+        try:
+            if not self.token:
+                self.log_error("AIWaverider token not found")
+                return False
+            
+            # Get existing files for the folder
+            existing_files = await self._get_existing_files(folder_path)
+            
+            # Check if our file exists
+            exists = filename in existing_files
+            if exists:
+                self.log_step(f"File {filename} already exists on AIWaverider Drive")
+            else:
+                self.log_step(f"File {filename} not found on AIWaverider Drive")
+            
+            return exists
+            
+        except Exception as e:
+            self.log_error(f"Error checking file existence on AIWaverider Drive: {str(e)}")
+            return False
+    
     async def _upload_video_to_aiwaverider(self, video_path: str) -> bool:
-        """Upload video to AIWaverider Drive"""
+        """Upload video to AIWaverider Drive with existence checking"""
+        filename = os.path.basename(video_path)
+        
+        # Check if file already exists on AIWaverider Drive
+        if await self._check_file_exists_on_aiwaverider(filename, self.video_folder_path):
+            self.log_step(f"Video {filename} already exists on AIWaverider Drive. Skipping.")
+            return True
+        
         return await self._upload_to_aiwaverider_drive_async(video_path, self.video_folder_path, "video")
     
     async def _upload_thumbnail_to_aiwaverider(self, thumbnail_path: str) -> bool:
-        """Upload thumbnail to AIWaverider Drive"""
+        """Upload thumbnail to AIWaverider Drive with existence checking"""
+        filename = os.path.basename(thumbnail_path)
+        
+        # Check if file already exists on AIWaverider Drive
+        if await self._check_file_exists_on_aiwaverider(filename, self.thumbnail_folder_path):
+            self.log_step(f"Thumbnail {filename} already exists on AIWaverider Drive. Skipping.")
+            return True
+        
         return await self._upload_to_aiwaverider_drive_async(thumbnail_path, self.thumbnail_folder_path, "thumbnail")
     
+    @retry_async(AIWAVERIDER_RETRY_CONFIG)
     async def _upload_to_aiwaverider_drive_async(self, file_path: str, folder_path: str, file_type: str) -> bool:
-        """Async upload file to AIWaverider Drive with support for chunked uploads"""
+        """Async upload file to AIWaverider Drive with support for chunked uploads, retry logic, and circuit breaker"""
+        try:
+            # Use circuit breaker to protect against API failures
+            return await self.circuit_breaker.call_async(self._perform_upload, file_path, folder_path, file_type)
+                
+        except Exception as e:
+            self.log_error(f"Error uploading {file_type} to AIWaverider Drive: {str(e)}")
+            return False
+    
+    async def _perform_upload(self, file_path: str, folder_path: str, file_type: str) -> bool:
+        """Perform the actual upload operation (called by circuit breaker)"""
         try:
             if not self.token:
                 self.log_error("AIWaverider token not found")
@@ -286,8 +342,8 @@ class AIWaveriderProcessor(BaseProcessor):
                 return await self._upload_large_file_chunked_async(file_path, folder_path, file_type)
                 
         except Exception as e:
-            self.log_error(f"Error uploading {file_type} to AIWaverider Drive: {str(e)}")
-            return False
+            self.log_error(f"Error in upload operation: {str(e)}")
+            raise
     
     async def _upload_small_file_async(self, file_path: str, folder_path: str, file_type: str) -> bool:
         """Async upload small files (< 10MB) using regular upload endpoint"""

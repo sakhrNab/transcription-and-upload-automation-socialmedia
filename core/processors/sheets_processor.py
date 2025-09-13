@@ -19,6 +19,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from core.processors.base_processor import BaseProcessor
 from system.database import db_manager
 from system.config import settings
+from system.error_recovery import retry_async, RetryConfig, GOOGLE_API_RETRY_CONFIG, CircuitBreaker
 
 # Google Sheets API
 from google.oauth2.credentials import Credentials
@@ -48,6 +49,13 @@ class SheetsProcessor(BaseProcessor):
         self.offline_mode = True
         self.local_backup_file = 'master_sheet_backup.json'
         self.local_data = {'rows': {}, 'last_sync': None}
+        
+        # Circuit breaker for Google Sheets API
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=3,
+            timeout=30,
+            expected_exception=Exception
+        )
         
         # Status constants
         self.STATUS_PENDING = 'PENDING'
@@ -88,6 +96,9 @@ class SheetsProcessor(BaseProcessor):
             if not self.service:
                 self.log_error("Failed to initialize Google Sheets service")
                 return False
+            
+            # Ensure sheet exists or create it
+            await self._ensure_sheet_exists()
             
             self.offline_mode = False
             self._load_local_backup()
@@ -262,7 +273,7 @@ class SheetsProcessor(BaseProcessor):
                     'upload_status_tiktok_ai.waverider': self.STATUS_PENDING,
                     'upload_status_tiktok_aiwaverider9': self.STATUS_PENDING,
                     'upload_status_thumbnail': self.STATUS_UPLOADED if matching_thumbnail and matching_thumbnail.get('drive_id') else self.STATUS_PENDING,
-                    'thumbnail_image': f"https://drive.google.com/uc?id={matching_thumbnail['drive_id']}" if matching_thumbnail and matching_thumbnail.get('drive_id') else '',
+                    'thumbnail_image': '',  # Will be populated after image upload
                     'transcription_status': video.get('transcription_status', 'PENDING')
                 }
                 content_list.append(content_info)
@@ -273,8 +284,18 @@ class SheetsProcessor(BaseProcessor):
             self.log_error("Error preparing sheet data", e)
             return []
     
+    @retry_async(GOOGLE_API_RETRY_CONFIG)
     async def _update_sheet_with_data(self, content_list: List[Dict]) -> bool:
-        """Update the Google Sheet with the prepared data"""
+        """Update the Google Sheet with the prepared data with retry logic and circuit breaker"""
+        try:
+            # Use circuit breaker to protect against API failures
+            return await self.circuit_breaker.call_async(self._perform_sheet_update, content_list)
+        except Exception as e:
+            self.log_error(f"Error updating sheet with circuit breaker: {str(e)}")
+            return False
+    
+    async def _perform_sheet_update(self, content_list: List[Dict]) -> bool:
+        """Perform the actual sheet update operation (called by circuit breaker)"""
         try:
             if not self.service:
                 self.log_step("No Google Sheets service available, saving to local backup")
@@ -290,6 +311,9 @@ class SheetsProcessor(BaseProcessor):
             
             # Update the sheet with new data
             self.log_step(f"Updating Google Sheet with {len(content_list)} entries")
+            
+            # Upload thumbnail images and update content_list
+            await self._upload_thumbnail_images(content_list)
             
             # Separate existing and new entries
             existing_entries = []
@@ -496,6 +520,252 @@ class SheetsProcessor(BaseProcessor):
             
         except Exception as e:
             self.log_error("Error saving tracking data locally", e)
+    
+    async def _upload_thumbnail_images(self, content_list: List[Dict]) -> None:
+        """Upload thumbnail images to Google Drive and update content_list with image URLs"""
+        try:
+            if not self.service:
+                self.log_step("No Google Sheets service available, skipping thumbnail image uploads")
+                return
+            
+            # Get Drive service for image uploads
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+            
+            drive_service = build('drive', 'v3', credentials=self.service._http.credentials)
+            
+            # Get existing thumbnail images from Google Drive to avoid duplicates
+            existing_images = await self._get_existing_thumbnail_images(drive_service)
+            
+            for content_info in content_list:
+                thumbnail_name = content_info.get('thumbnail_name', '')
+                if not thumbnail_name:
+                    continue
+                
+                # Check if thumbnail image already exists in Google Drive
+                image_filename = f"thumbnail_{thumbnail_name}"
+                if image_filename in existing_images:
+                    content_info['thumbnail_image'] = existing_images[image_filename]
+                    self.log_step(f"Thumbnail image already exists in Drive for {content_info.get('filename', '')}. Skipping upload.")
+                    continue
+                
+                # Find the thumbnail file locally
+                thumbnail_path = await self._find_thumbnail_file(thumbnail_name)
+                if not thumbnail_path:
+                    self.log_step(f"Thumbnail file not found locally: {thumbnail_name}")
+                    continue
+                
+                # Upload image to Drive
+                image_url = await self._upload_thumbnail_to_drive(drive_service, thumbnail_path, thumbnail_name)
+                if image_url:
+                    content_info['thumbnail_image'] = image_url
+                    self.log_step(f"Uploaded thumbnail image for {content_info.get('filename', '')}")
+                else:
+                    self.log_error(f"Failed to upload thumbnail image for {content_info.get('filename', '')}")
+                    
+        except Exception as e:
+            self.log_error(f"Error uploading thumbnail images: {str(e)}")
+    
+    async def _find_thumbnail_file(self, thumbnail_name: str) -> Optional[str]:
+        """Find thumbnail file in the thumbnails directory"""
+        try:
+            thumbnails_dir = "assets/downloads/thumbnails"
+            for root, dirs, files in os.walk(thumbnails_dir):
+                if thumbnail_name in files:
+                    return os.path.join(root, thumbnail_name)
+            return None
+        except Exception as e:
+            self.log_error(f"Error finding thumbnail file {thumbnail_name}: {str(e)}")
+            return None
+    
+    async def _upload_thumbnail_to_drive(self, drive_service, thumbnail_path: str, thumbnail_name: str) -> Optional[str]:
+        """Upload thumbnail to Google Drive and return the image URL"""
+        try:
+            # Upload image to Drive first
+            file_metadata = {
+                'name': f"thumbnail_{thumbnail_name}",
+                'parents': ['1iUmCVkX863MqyvJIZ_aWbi9toEI39X8Z']  # Thumbnails folder
+            }
+            
+            media = MediaFileUpload(thumbnail_path, mimetype='image/jpeg')
+            file = drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+            
+            image_id = file.get('id')
+            if not image_id:
+                return None
+            
+            # Make the image publicly accessible
+            try:
+                drive_service.permissions().create(
+                    fileId=image_id,
+                    body={'role': 'reader', 'type': 'anyone'}
+                ).execute()
+                
+                # Return the image URL for use in IMAGE formula
+                return f"https://drive.google.com/uc?export=view&id={image_id}"
+                
+            except Exception as permission_error:
+                self.log_error(f"Error setting image permissions: {str(permission_error)}")
+                # Fallback to original URL format
+                return f"https://drive.google.com/uc?id={image_id}"
+                
+        except Exception as e:
+            self.log_error(f"Error uploading thumbnail to Drive: {str(e)}")
+            return None
+    
+    async def _get_existing_thumbnail_images(self, drive_service) -> Dict[str, str]:
+        """Get existing thumbnail images from Google Drive to avoid duplicates"""
+        try:
+            # Search for files in the thumbnails folder
+            results = drive_service.files().list(
+                q="'1iUmCVkX863MqyvJIZ_aWbi9toEI39X8Z' in parents and name contains 'thumbnail_'",
+                fields="files(id, name, webViewLink)"
+            ).execute()
+            
+            existing_images = {}
+            for file_info in results.get('files', []):
+                filename = file_info.get('name', '')
+                file_id = file_info.get('id', '')
+                if filename and file_id:
+                    # Create the image URL for use in IMAGE formula
+                    image_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+                    existing_images[filename] = image_url
+            
+            self.log_step(f"Found {len(existing_images)} existing thumbnail images in Google Drive")
+            return existing_images
+            
+        except Exception as e:
+            self.log_error(f"Error getting existing thumbnail images: {str(e)}")
+            return {}
+    
+    async def _ensure_sheet_exists(self) -> None:
+        """Ensure the master sheet exists or create it if it doesn't"""
+        try:
+            if not self.service:
+                self.log_step("No Google Sheets service available, cannot check sheet existence")
+                return
+            
+            # Try to get the existing sheet
+            try:
+                sheet_info = self.service.spreadsheets().get(spreadsheetId=self.master_sheet_id).execute()
+                self.log_step("Found existing master tracking sheet")
+                
+                # Check if our target sheet exists
+                sheet_names = [sheet['properties']['title'] for sheet in sheet_info.get('sheets', [])]
+                if self.master_sheet_name not in sheet_names:
+                    self.log_step(f"Sheet '{self.master_sheet_name}' not found. Available sheets: {sheet_names}")
+                    # Use the first available sheet if our target doesn't exist
+                    if sheet_names:
+                        self.master_sheet_name = sheet_names[0]
+                        self.log_step(f"Using first available sheet: {self.master_sheet_name}")
+                
+                # Ensure headers exist
+                await self._ensure_headers_exist()
+                
+            except Exception as e:
+                if "404" not in str(e):
+                    raise
+                self.log_step("Sheet with provided ID not found, creating new one...")
+                await self._create_new_sheet()
+                
+        except Exception as e:
+            self.log_error(f"Error ensuring sheet exists: {str(e)}")
+            raise
+    
+    async def _create_new_sheet(self) -> None:
+        """Create a new master tracking sheet"""
+        try:
+            # Create new spreadsheet
+            spreadsheet = {
+                'properties': {
+                    'title': 'Video Processing Master Tracking Sheet'
+                },
+                'sheets': [{
+                    'properties': {
+                        'title': self.master_sheet_name,
+                        'gridProperties': {
+                            'frozenRowCount': 1  # Freeze header row
+                        }
+                    }
+                }]
+            }
+            
+            created_sheet = self.service.spreadsheets().create(body=spreadsheet).execute()
+            new_sheet_id = created_sheet['spreadsheetId']
+            
+            # Update the master_sheet_id in settings
+            self.master_sheet_id = new_sheet_id
+            self.log_step(f"Created new master tracking sheet with ID: {new_sheet_id}")
+            
+            # Initialize the sheet with headers
+            await self._ensure_headers_exist()
+            
+        except Exception as e:
+            self.log_error(f"Error creating new sheet: {str(e)}")
+            raise
+    
+    async def _ensure_headers_exist(self) -> None:
+        """Ensure headers exist in the sheet"""
+        try:
+            if not self.service:
+                return
+            
+            # Check if first row has headers
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=self.master_sheet_id,
+                range=f'{self.master_sheet_name}!A1:S1'
+            ).execute()
+            
+            values = result.get('values', [])
+            if not values or len(values[0]) < len(self.SHEET_COLUMNS):
+                self.log_step("Adding headers to sheet")
+                # Add headers
+                header_values = [self.SHEET_COLUMNS]
+                body = {'values': header_values}
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=self.master_sheet_id,
+                    range=f'{self.master_sheet_name}!A1',
+                    valueInputOption='RAW',
+                    body=body
+                ).execute()
+                
+                # Apply formatting to header row
+                requests = [{
+                    'repeatCell': {
+                        'range': {
+                            'sheetId': 0,
+                            'startRowIndex': 0,
+                            'endRowIndex': 1
+                        },
+                        'cell': {
+                            'userEnteredFormat': {
+                                'backgroundColor': {
+                                    'red': 0.8,
+                                    'green': 0.8,
+                                    'blue': 0.8
+                                },
+                                'textFormat': {
+                                    'bold': True
+                                }
+                            }
+                        },
+                        'fields': 'userEnteredFormat(backgroundColor,textFormat)'
+                    }
+                }]
+                self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=self.master_sheet_id,
+                    body={'requests': requests}
+                ).execute()
+                self.log_step("Headers added and formatted successfully")
+            else:
+                self.log_step("Headers already exist in sheet")
+                
+        except Exception as e:
+            self.log_error(f"Error ensuring headers exist: {str(e)}")
     
     async def cleanup(self) -> None:
         """Cleanup sheets processor resources"""
