@@ -17,11 +17,13 @@ Features:
 """
 
 import os
+import sys
 import re
 import json
 import time
 import argparse
 import concurrent.futures
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -48,6 +50,10 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+# Add parent directory to path to import system modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from system.database import db_manager
+
 # Load environment variables
 load_dotenv()
 
@@ -55,10 +61,10 @@ load_dotenv()
 # Configuration from .env
 # ---------------------------
 # Directory structure
-VIDEO_OUTPUT_DIR = os.getenv("VIDEO_OUTPUT_DIR", "downloads/videos")
-AUDIO_OUTPUT_DIR = os.getenv("AUDIO_OUTPUT_DIR", "downloads/audio") 
-THUMBNAILS_DIR = os.getenv("THUMBNAILS_DIR", "downloads/thumbnails")
-TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "downloads/transcripts")
+VIDEO_OUTPUT_DIR = os.getenv("VIDEO_OUTPUT_DIR", "assets/downloads/videos")
+AUDIO_OUTPUT_DIR = os.getenv("AUDIO_OUTPUT_DIR", "assets/downloads/audio") 
+THUMBNAILS_DIR = os.getenv("THUMBNAILS_DIR", "assets/downloads/thumbnails")
+TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "assets/downloads/transcripts")
 LOGS_DIR = os.getenv("LOGS_DIR", "logs")
 
 # Excel configuration
@@ -74,8 +80,8 @@ KEEP_TEMP_FILES = os.getenv("KEEP_TEMP_FILES", "false").lower() == "true"
 
 # Google Drive configuration
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "config/credentials.json")
+TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "config/token.json")
 DRIVE_FOLDER = os.getenv("GOOGLE_DRIVE_FOLDER", "VideoTranscripts")
 
 # OpenAI configuration
@@ -318,6 +324,113 @@ def get_video_number(output_dir: str, username: str) -> int:
                 except (ValueError, IndexError):
                     continue
     return max_num + 1
+
+def extract_video_id_from_url(url: str) -> Optional[str]:
+    """Extract video ID from various platform URLs"""
+    try:
+        # YouTube
+        if 'youtube.com' in url or 'youtu.be' in url:
+            if 'youtu.be/' in url:
+                return url.split('youtu.be/')[-1].split('?')[0]
+            elif 'v=' in url:
+                return url.split('v=')[-1].split('&')[0]
+        
+        # Instagram
+        elif 'instagram.com' in url:
+            if '/p/' in url:
+                return url.split('/p/')[-1].split('/')[0]
+            elif '/reel/' in url:
+                return url.split('/reel/')[-1].split('/')[0]
+        
+        # TikTok
+        elif 'tiktok.com' in url:
+            if '/video/' in url:
+                return url.split('/video/')[-1].split('?')[0]
+        
+        # Generic fallback - use last part of URL
+        return url.split('/')[-1].split('?')[0]
+    except Exception:
+        return None
+
+# ---------------------------
+# Database Integration Functions
+# ---------------------------
+async def check_existing_transcription(video_id: str) -> Optional[Dict[str, Any]]:
+    """Check if video is already transcribed in database"""
+    try:
+        videos = await db_manager.get_all_videos()
+        for video in videos:
+            if video.get('video_id') == video_id or video_id in video.get('filename', ''):
+                if video.get('transcription_status') == 'COMPLETED' and video.get('transcription_text'):
+                    return video
+        return None
+    except Exception as e:
+        logger.log_error(0, f"Error checking existing transcription: {str(e)}")
+        return None
+
+async def update_video_transcription(video_id: str, transcript: str, smart_name: str, video_path: str, thumbnail_path: str = None):
+    """Update video record with transcription data"""
+    try:
+        # Find existing video record
+        videos = await db_manager.get_all_videos()
+        video_record = None
+        for video in videos:
+            if video.get('video_id') == video_id or video_id in video.get('filename', ''):
+                video_record = video
+                break
+        
+        if video_record:
+            # Update existing record
+            await db_manager.upsert_video({
+                'filename': video_record.get('filename', ''),
+                'file_path': video_path,
+                'url': video_record.get('url', ''),
+                'drive_id': video_record.get('drive_id', ''),
+                'drive_url': video_record.get('drive_url', ''),
+                'upload_status': video_record.get('upload_status', 'PENDING'),
+                'transcription_status': 'COMPLETED',
+                'transcription_text': transcript,
+                'smart_name': smart_name,
+                'file_hash': video_record.get('file_hash', '')
+            })
+            logger.log_step(0, "DB_UPDATE_SUCCESS", {
+                "message": f"Updated video record with transcription",
+                "video_id": video_id,
+                "transcript_length": len(transcript)
+            })
+        else:
+            # Create new record
+            await db_manager.upsert_video({
+                'filename': f"{video_id}.mp4",
+                'file_path': video_path,
+                'url': '',
+                'drive_id': '',
+                'drive_url': '',
+                'upload_status': 'PENDING',
+                'transcription_status': 'COMPLETED',
+                'transcription_text': transcript,
+                'smart_name': smart_name,
+                'file_hash': ''
+            })
+            logger.log_step(0, "DB_CREATE_SUCCESS", {
+                "message": f"Created new video record with transcription",
+                "video_id": video_id
+            })
+        
+        # Update thumbnail if provided
+        if thumbnail_path:
+            await db_manager.upsert_thumbnail({
+                'filename': os.path.basename(thumbnail_path),
+                'file_path': thumbnail_path,
+                'video_filename': f"{video_id}.mp4",
+                'drive_id': '',
+                'drive_url': '',
+                'upload_status': 'PENDING',
+                'file_hash': ''
+            })
+            
+    except Exception as e:
+        logger.log_error(0, f"Error updating video transcription: {str(e)}")
 
 # ---------------------------
 # Video Processing Functions
@@ -951,7 +1064,7 @@ def upload_to_drive(file_path: str):
 # ---------------------------
 # Main Processing Pipeline
 # ---------------------------
-def process_single_video(url: str, index: int = 1) -> Dict[str, Any]:
+async def process_single_video(url: str, index: int = 1) -> Dict[str, Any]:
     """Process a single video through the complete pipeline"""
     start_time = time.time()
     date_processed = datetime.now().strftime('%d.%m.%Y')
@@ -968,6 +1081,27 @@ def process_single_video(url: str, index: int = 1) -> Dict[str, Any]:
     
     try:
         logger.log_step(index, "PROCESSING_START", {"message": f"Starting complete pipeline", "url": url})
+        
+        # Step 0: Check if already transcribed
+        video_id = extract_video_id_from_url(url)
+        if video_id:
+            existing = await check_existing_transcription(video_id)
+            if existing:
+                logger.log_step(index, "ALREADY_TRANSCRIBED", {
+                    "message": f"Video already transcribed in database",
+                    "video_id": video_id,
+                    "transcript_length": len(existing.get('transcription_text', ''))
+                })
+                result.update({
+                    'video_id': video_id,
+                    'status': 'Skipped',
+                    'notes': 'Already transcribed',
+                    'transcript': existing.get('transcription_text', ''),
+                    'generated_name': existing.get('smart_name', ''),
+                    'video_path': existing.get('file_path', ''),
+                    'thumbnail_path': ''
+                })
+                return result
         
         # Step 1: Download video and extract metadata
         video_path, metadata, raw_info = download_video_and_metadata(url, index)
@@ -1005,6 +1139,11 @@ def process_single_video(url: str, index: int = 1) -> Dict[str, Any]:
             result['transcript_path'] = transcript_path
             result['status'] = 'Completed'
             result['notes'] = f'Successfully processed. Transcript: {len(transcript)} chars, {len(transcript.split())} words'
+            
+            # Step 7: Update database with transcription
+            video_id = metadata.get('video_id', '')
+            if video_id:
+                await update_video_transcription(video_id, transcript, generated_name, video_path, thumbnail_path)
             
             logger.log_step(index, "PIPELINE_SUCCESS", {
                 "message": f"Complete pipeline successful: {generated_name}",
@@ -1060,7 +1199,7 @@ def process_single_video(url: str, index: int = 1) -> Dict[str, Any]:
     
     return result
 
-def process_batch(urls: List[str]) -> List[Dict[str, Any]]:
+async def process_batch(urls: List[str]) -> List[Dict[str, Any]]:
     """Process multiple videos with comprehensive logging"""
     logger.log_step(0, "BATCH_START", {
         "message": f"Starting batch processing",
@@ -1068,10 +1207,14 @@ def process_batch(urls: List[str]) -> List[Dict[str, Any]]:
         "session_id": logger.session_id
     })
     
+    # Initialize database
+    await db_manager.initialize()
+    logger.log_step(0, "DB_INITIALIZED", {"message": "Database initialized successfully"})
+    
     results = []
     
     for i, url in enumerate(urls, 1):
-        result = process_single_video(url.strip(), i)
+        result = await process_single_video(url.strip(), i)
         results.append(result)
         
         # Update Excel after each video
@@ -1088,6 +1231,9 @@ def process_batch(urls: List[str]) -> List[Dict[str, Any]]:
     
     # Upload to Google Drive
     upload_to_drive(EXCEL_FILE_PATH)
+    
+    # Close database connection
+    await db_manager.close()
     
     return results
 
@@ -1141,7 +1287,7 @@ def main():
     print(f" 📋 Logs: {LOGS_DIR}")
     
     # Process videos
-    results = process_batch(urls)
+    results = asyncio.run(process_batch(urls))
     
     print(f"\nProcessing complete! Check logs in {LOGS_DIR} for detailed session information.")
 

@@ -7,11 +7,12 @@ SQLite-based state management with async support
 import aiosqlite
 import json
 import asyncio
+import threading
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
-from config import settings
-from processor_logger import processor_logger as logger
+from .config import settings
+from .processor_logger import processor_logger as logger
 
 class DatabaseManager:
     """Async SQLite database manager for state management"""
@@ -21,21 +22,28 @@ class DatabaseManager:
         self.pool_size = settings.database_pool_size
         self._connection_pool = asyncio.Queue(maxsize=self.pool_size)
         self._initialized = False
+        self._lock = asyncio.Lock()
+        self._closed = False
     
     async def initialize(self):
         """Initialize database and create tables"""
-        if self._initialized:
-            return
-        
-        # Create connection pool
-        for _ in range(self.pool_size):
-            conn = await aiosqlite.connect(self.db_path)
-            await self._connection_pool.put(conn)
-        
-        # Create tables
-        await self._create_tables()
-        self._initialized = True
-        logger.log_step("Database initialized successfully")
+        async with self._lock:
+            if self._initialized or self._closed:
+                return
+            
+            # Create connection pool
+            for _ in range(self.pool_size):
+                conn = await aiosqlite.connect(
+                    self.db_path,
+                    timeout=30.0,  # 30 second timeout
+                    check_same_thread=False
+                )
+                await self._connection_pool.put(conn)
+            
+            # Create tables
+            await self._create_tables()
+            self._initialized = True
+            logger.log_step("Database initialized successfully")
     
     async def _create_tables(self):
         """Create database tables"""
@@ -130,11 +138,31 @@ class DatabaseManager:
     @asynccontextmanager
     async def get_connection(self):
         """Get database connection from pool"""
-        conn = await self._connection_pool.get()
+        if self._closed:
+            raise RuntimeError("Database manager is closed")
+        
+        conn = None
         try:
+            conn = await asyncio.wait_for(self._connection_pool.get(), timeout=10.0)
             yield conn
+        except asyncio.TimeoutError:
+            # If pool is empty, create a new connection
+            conn = await aiosqlite.connect(
+                self.db_path,
+                timeout=30.0,
+                check_same_thread=False
+            )
+            try:
+                yield conn
+            finally:
+                await conn.close()
         finally:
-            await self._connection_pool.put(conn)
+            if conn and not self._closed:
+                try:
+                    await self._connection_pool.put(conn)
+                except asyncio.QueueFull:
+                    # Pool is full, close the connection
+                    await conn.close()
     
     # Video management methods
     async def upsert_video(self, video_data: Dict[str, Any]) -> int:
@@ -391,11 +419,73 @@ class DatabaseManager:
         # In a full implementation, you might want to store this in a cache table
         logger.log_step(f"Cache data stored for {folder_path}: {len(cache_data)} items")
 
+    async def get_videos_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """Get videos by status"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM videos WHERE upload_status = ?", (status,)
+            )
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_all_videos(self) -> List[Dict[str, Any]]:
+        """Get all videos"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute("SELECT * FROM videos")
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_thumbnails_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """Get thumbnails by status"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM thumbnails WHERE upload_status = ?", (status,)
+            )
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+    
+    async def get_all_thumbnails(self) -> List[Dict[str, Any]]:
+        """Get all thumbnails"""
+        async with self.get_connection() as conn:
+            cursor = await conn.execute("SELECT * FROM thumbnails")
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+
     async def close(self):
         """Close all database connections"""
-        while not self._connection_pool.empty():
-            conn = await self._connection_pool.get()
-            await conn.close()
+        async with self._lock:
+            if self._closed:
+                return
+                
+            self._closed = True
+            
+            try:
+                # Close all connections in the pool
+                connections_to_close = []
+                while not self._connection_pool.empty():
+                    try:
+                        conn = await asyncio.wait_for(self._connection_pool.get(), timeout=0.5)
+                        connections_to_close.append(conn)
+                    except asyncio.TimeoutError:
+                        break
+                
+                # Close all connections
+                for conn in connections_to_close:
+                    try:
+                        await conn.close()
+                    except Exception as e:
+                        logger.log_error(f"Error closing individual connection: {str(e)}")
+                
+                self._initialized = False
+                logger.log_step("Database connections closed successfully")
+                
+            except Exception as e:
+                logger.log_error(f"Error closing database connections: {str(e)}")
+                self._initialized = False
 
 # Global database instance
 db_manager = DatabaseManager()

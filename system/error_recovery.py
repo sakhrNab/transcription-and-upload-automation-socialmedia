@@ -11,8 +11,8 @@ from functools import wraps
 from typing import Callable, Any, Optional, Dict, List
 from enum import Enum
 from dataclasses import dataclass
-from config import settings
-from processor_logger import processor_logger as logger
+from .config import settings
+from .processor_logger import processor_logger as logger
 
 class CircuitState(Enum):
     CLOSED = "CLOSED"      # Normal operation

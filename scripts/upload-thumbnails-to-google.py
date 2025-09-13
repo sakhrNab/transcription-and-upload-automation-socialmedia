@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Upload thumbnails folder to a specified Google Drive folder and track uploads in state-thumbnails.json
+Upload thumbnails folder to a specified Google Drive folder and track uploads in database
 
 Usage:
   python upload-thumbnails-to-google.py
 
 Config via .env (optional):
-  THUMBNAILS_DIR - folder to watch (default: downloads/thumbnails)
-  THUMBNAILS_STATE_FILE - state file (default: state-thumbnails.json)
+  THUMBNAILS_DIR - folder to watch (default: assets/downloads/thumbnails)
   THUMBNAILS_DRIVE_FOLDER_ID - target Drive folder id (default: provided by user)
 
 This script mirrors the behavior of the video uploader but for image files.
 """
 import os
-import json
-import time
+import sys
+import asyncio
 import hashlib
 import schedule
 import argparse
@@ -27,41 +26,71 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from dotenv import load_dotenv
 
+# Add parent directory to path to import system modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from system.database import db_manager
+
 # Load environment
 load_dotenv()
 
 # Configuration
-THUMBNAILS_DIR = os.getenv('THUMBNAILS_DIR', 'downloads/thumbnails')
-STATE_FILE = os.getenv('THUMBNAILS_STATE_FILE', 'state-thumbnails.json')
+THUMBNAILS_DIR = os.getenv('THUMBNAILS_DIR', 'assets/downloads/thumbnails')
 # Default Drive folder ID provided by user; can be overridden in .env
 DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID = os.getenv('THUMBNAILS_DRIVE_FOLDER_ID', '1iUmCVkX863MqyvJIZ_aWbi9toEI39X8Z')
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
-TOKEN_FILE = os.getenv('GOOGLE_TOKEN_FILE', 'token.json')
+CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'config/credentials.json')
+TOKEN_FILE = os.getenv('GOOGLE_TOKEN_FILE', 'config/token.json')
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 
 
-def load_state(path: str) -> Dict[str, Dict]:
-    if os.path.exists(path):
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            print(f"Warning: could not read state file {path}. Starting fresh.")
-            return {}
-    return {}
-
-
-def save_state(path: str, state: Dict[str, Dict]):
+async def load_state() -> Dict[str, Dict]:
+    """
+    Load the state from the database.
+    """
     try:
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp, path)
-        print(f"Saved state to {path} ({len(state)} entries)")
+        thumbnails = await db_manager.get_all_thumbnails()
+        state = {}
+        for thumbnail in thumbnails:
+            file_path = thumbnail.get('file_path', '')
+            if file_path:
+                # Normalize path for consistent comparison
+                normalized_path = os.path.normpath(file_path)
+                state[normalized_path] = {
+                    'filename': thumbnail.get('filename', ''),
+                    'video_filename': thumbnail.get('video_filename', ''),
+                    'drive_id': thumbnail.get('drive_id', ''),
+                    'drive_url': thumbnail.get('drive_url', ''),
+                    'upload_status': thumbnail.get('upload_status', 'PENDING'),
+                    'file_hash': thumbnail.get('file_hash', ''),
+                    'content_hash': thumbnail.get('file_hash', ''),  # For backward compatibility
+                    'last_modified': thumbnail.get('updated_at', '')
+                }
+        return state
     except Exception as e:
-        print(f"Failed to save state file {path}: {e}")
+        print(f"Error loading state from database: {e}")
+        return {}
+
+
+async def save_state(state: Dict[str, Dict]):
+    """
+    Save the state to the database.
+    """
+    try:
+        # Update database with current state
+        for file_path, data in state.items():
+            await db_manager.upsert_thumbnail({
+                'filename': data.get('filename', ''),
+                'file_path': file_path,
+                'video_filename': data.get('video_filename', ''),
+                'drive_id': data.get('drive_id', ''),
+                'drive_url': data.get('drive_url', ''),
+                'upload_status': data.get('upload_status', 'PENDING'),
+                'file_hash': data.get('file_hash', '')
+            })
+        print(f"State saved successfully to database: {len(state)} files tracked")
+    except Exception as e:
+        print(f"Error saving state to database: {e}")
 
 
 def get_file_hash(file_path: str) -> str:
@@ -104,11 +133,14 @@ def get_file_by_name_in_folder(service, filename: str, folder_id: str):
     return files[0] if files else None
 
 
-def upload_file(service, file_path: str, folder_id: str, state: Dict[str, Dict]):
+async def upload_file(service, file_path: str, folder_id: str, state: Dict[str, Dict]):
     filename = os.path.basename(file_path)
     current_hash = get_file_hash(file_path)
+    
+    # Normalize path for comparison with database state
+    normalized_path = os.path.normpath(file_path)
 
-    if file_path in state and state[file_path].get('content_hash') == current_hash:
+    if normalized_path in state and state[normalized_path].get('file_hash') == current_hash and state[normalized_path].get('upload_status') == 'COMPLETED':
         print(f"Skipping (unchanged): {filename}")
         return None
 
@@ -135,15 +167,33 @@ def upload_file(service, file_path: str, folder_id: str, state: Dict[str, Dict])
             return None
 
     # Update state
-    state_entry = state.get(file_path, {})
+    state_entry = state.get(normalized_path, {})
     state_entry.update({
-        'file_path': file_path,
-        'file_name': filename,
-        'content_hash': current_hash,
+        'file_path': normalized_path,
+        'filename': filename,
+        'file_hash': current_hash,
+        'content_hash': current_hash,  # For backward compatibility
         'drive_id': file_id,
+        'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
+        'upload_status': 'COMPLETED',
         'last_upload': datetime.now().isoformat()
     })
-    state[file_path] = state_entry
+    state[normalized_path] = state_entry
+    
+    # Update database with successful upload
+    try:
+        await db_manager.upsert_thumbnail({
+            'filename': filename,
+            'file_path': normalized_path,
+            'video_filename': '',  # Will be updated later if needed
+            'drive_id': file_id,
+            'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
+            'upload_status': 'COMPLETED',
+            'file_hash': current_hash
+        })
+        print(f"✅ Database updated for: {filename}")
+    except Exception as e:
+        print(f"❌ Error updating database for {filename}: {e}")
     return file_id
 
 
@@ -159,14 +209,14 @@ def find_image_files(folder: str):
     return files
 
 
-def check_and_upload():
+async def check_and_upload():
     """
     Scan the thumbnails directory and upload new/modified image files.
     """
     print(f"\n[{datetime.now()}] Starting thumbnail scan in: {THUMBNAILS_DIR}")
     print(f"Target Drive folder ID: {DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID}")
     
-    state = load_state(STATE_FILE)
+    state = await load_state()
     files = find_image_files(THUMBNAILS_DIR)
     
     if not files:
@@ -178,17 +228,19 @@ def check_and_upload():
     
     for f in sorted(files):
         try:
-            res = upload_file(service, f, DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID, state)
+            res = await upload_file(service, f, DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID, state)
             if res:
                 uploaded += 1
         except Exception as e:
             print(f"Error uploading {f}: {e}")
 
     if uploaded > 0:
-        save_state(STATE_FILE, state)
+        await save_state(state)
         print(f"Done. Uploaded/updated: {uploaded} file(s)")
+    else:
+        print("No new or updated files to upload")
 
-def main(single_run=False):
+async def main(single_run=False):
     """
     Run thumbnail uploader in either single-run or continuous mode.
     Args:
@@ -196,16 +248,19 @@ def main(single_run=False):
     """
     print(f"Thumbnail uploader starting.")
     print(f"Watching directory: {THUMBNAILS_DIR}")
-    print(f"State file: {STATE_FILE}")
     print(f"Target Drive folder ID: {DEFAULT_THUMBNAILS_DRIVE_FOLDER_ID}")
     print(f"Mode: {'single-run' if single_run else 'continuous'}")
     
+    # Initialize database
+    await db_manager.initialize()
+    print("Database initialized successfully")
+    
     # Do initial check
-    check_and_upload()
+    await check_and_upload()
     
     if not single_run:
         # Schedule periodic checks only in continuous mode
-        schedule.every(1).minutes.do(check_and_upload)
+        schedule.every(1).minutes.do(lambda: asyncio.run(check_and_upload()))
         
         print("\nThumbnail monitor is running in continuous mode. Press Ctrl+C to exit.")
         try:
@@ -216,6 +271,8 @@ def main(single_run=False):
             print("\nExiting thumbnail monitor...")
     else:
         print("\nThumbnail check completed (single run mode)")
+    
+    await db_manager.close()
 
 
 if __name__ == '__main__':
@@ -224,4 +281,4 @@ if __name__ == '__main__':
     parser.add_argument('--single-run', action='store_true', help='Run once and exit (default: continuous mode)')
     args = parser.parse_args()
     
-    main(single_run=args.single_run)
+    asyncio.run(main(single_run=args.single_run))

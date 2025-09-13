@@ -1,9 +1,12 @@
 import os
+import sys
 import json
 import time
 import schedule
 import hashlib
 import argparse
+import asyncio
+import aiosqlite
 from datetime import datetime
 from tqdm import tqdm
 from dotenv import load_dotenv
@@ -13,6 +16,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+
+# Add parent directory to path to import system modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from system.database import db_manager
 
 # The purpose of this class is to upload videos (.mp4) to GDrive and tracks the status of uploaded videos
 # to avoid duplicated uploads
@@ -24,11 +31,11 @@ load_dotenv()
 
 # Path to watch for new/updated .mp4 files. Can be set in a .env file as FOLDER_TO_WATCH
 # Example .env entry: FOLDER_TO_WATCH=E:/AIWaverider/videos
-FOLDER_TO_WATCH = os.getenv('FOLDER_TO_WATCH', os.getcwd())  # Default to current working directory
-STATE_FILE = 'state.json'       # File to store state info for each MP4 file
+FOLDER_TO_WATCH = os.getenv('FOLDER_TO_WATCH', 'assets/finished_videos')  # Default to assets directory
+STATE_FILE = 'data/state/state.json'       # File to store state info for each MP4 file
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-CREDENTIALS_FILE = 'credentials.json'  # Your Google API credentials file
-TOKEN_FILE = 'token.json'              # Stores the user's access and refresh tokens
+CREDENTIALS_FILE = 'config/credentials.json'  # Your Google API credentials file
+TOKEN_FILE = 'config/token.json'              # Stores the user's access and refresh tokens
 DRIVE_FOLDER = 'AIWaverider'
 EXCLUDED_FOLDERS = {
     'temp', '.temp', 'tmp', '.tmp', 
@@ -117,7 +124,7 @@ def get_file_hash(file_path):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
-def upload_file(service, file_path, state):
+async def upload_file(service, file_path, state):
     """Upload file with state tracking and duplicate handling"""
     file_name = os.path.basename(file_path)
     folder_id = get_folder_id(service)
@@ -167,6 +174,24 @@ def upload_file(service, file_path, state):
     state[file_path]['drive_id'] = file_id
     state[file_path]['last_upload'] = datetime.now().isoformat()
     
+    # Update database with successful upload
+    try:
+        await db_manager.upsert_video({
+            'filename': file_name,
+            'file_path': file_path,
+            'drive_id': file_id,
+            'drive_url': f"https://drive.google.com/file/d/{file_id}/view",
+            'upload_status': 'COMPLETED',
+            'file_hash': current_hash,
+            'url': '',
+            'transcription_status': 'PENDING',
+            'transcription_text': '',
+            'smart_name': ''
+        })
+        print(f"✅ Database updated for: {file_name}")
+    except Exception as e:
+        print(f"❌ Error updating database for {file_name}: {e}")
+    
     return file_id
 
 def update_existing_file(service, file_id, file_path):
@@ -201,31 +226,53 @@ def get_file_by_name(service, filename, folder_id):
 # ---------------------------
 # Folder Monitoring Functions
 # ---------------------------
-def load_state():
+async def load_state():
     """
-    Load the state from the JSON file.
-    """
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, 'r') as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                print("Warning: Corrupted state file. Starting fresh.")
-                return {}
-    return {}
-
-def save_state(state):
-    """
-    Save the state to the JSON file.
+    Load the state from the database.
     """
     try:
-        temp_file = STATE_FILE + '.tmp'
-        with open(temp_file, 'w') as f:
-            json.dump(state, f, indent=2)
-        os.replace(temp_file, STATE_FILE)
-        print(f"State saved successfully: {len(state)} files tracked")
+        videos = await db_manager.get_all_videos()
+        state = {}
+        for video in videos:
+            file_path = video.get('file_path', '')
+            if file_path:
+                # Normalize path for consistent comparison
+                normalized_path = os.path.normpath(file_path)
+                state[normalized_path] = {
+                    'file_name': video.get('filename', ''),
+                    'drive_id': video.get('drive_id', ''),
+                    'drive_url': video.get('drive_url', ''),
+                    'upload_status': video.get('upload_status', 'PENDING'),
+                    'file_hash': video.get('file_hash', ''),
+                    'content_hash': video.get('file_hash', ''),  # For backward compatibility
+                    'last_modified': video.get('updated_at', '')
+                }
+        return state
     except Exception as e:
-        print(f"Error saving state file: {e}")
+        print(f"Error loading state from database: {e}")
+        return {}
+
+async def save_state(state):
+    """
+    Save the state to the database.
+    """
+    try:
+        for file_path, video_data in state.items():
+            await db_manager.upsert_video({
+                'filename': video_data.get('filename', ''),
+                'file_path': file_path,
+                'drive_id': video_data.get('drive_id', ''),
+                'drive_url': video_data.get('drive_url', ''),
+                'upload_status': video_data.get('upload_status', 'PENDING'),
+                'file_hash': video_data.get('file_hash', ''),
+                'url': video_data.get('url', ''),
+                'transcription_status': video_data.get('transcription_status', 'PENDING'),
+                'transcription_text': video_data.get('transcription_text', ''),
+                'smart_name': video_data.get('smart_name', '')
+            })
+        print(f"State saved successfully to database: {len(state)} files tracked")
+    except Exception as e:
+        print(f"Error saving state to database: {e}")
 
 def find_mp4_files_in_subfolder(subfolder_path):
     """
@@ -259,7 +306,12 @@ def scan_folder(folder, state):
             file_name = os.path.basename(item_path)
             current_hash = get_file_hash(item_path)
             # Only queue for upload if it hasn't been uploaded or has changed
-            if not (item_path in state and state[item_path].get('content_hash') == current_hash):
+            # Normalize path for comparison with database state
+            normalized_path = os.path.normpath(item_path)
+            
+            if not (normalized_path in state and 
+                   state[normalized_path].get('file_hash') == current_hash and 
+                   state[normalized_path].get('upload_status') == 'COMPLETED'):
                 state[item_path] = {
                     'file_path': item_path,
                     'file_name': file_name,
@@ -292,7 +344,12 @@ def scan_folder(folder, state):
             file_name = os.path.basename(mp4_file)
             current_hash = get_file_hash(mp4_file)
             
-            if not (mp4_file in state and state[mp4_file].get('content_hash') == current_hash):
+            # Normalize path for comparison with database state
+            normalized_path = os.path.normpath(mp4_file)
+            
+            if not (normalized_path in state and 
+                   state[normalized_path].get('file_hash') == current_hash and 
+                   state[normalized_path].get('upload_status') == 'COMPLETED'):
                 state[mp4_file] = {
                     'file_path': mp4_file,
                     'file_name': file_name,
@@ -311,12 +368,12 @@ def scan_folder(folder, state):
     
     return files_to_upload
 
-def check_and_upload():
+async def check_and_upload():
     """
     Scan the directory and upload new/modified MP4 files.
     """
     print(f"\n[{datetime.now()}] Starting folder scan in: {FOLDER_TO_WATCH}")
-    state = load_state()
+    state = await load_state()
     files_to_upload = scan_folder(FOLDER_TO_WATCH, state)
     
     if files_to_upload:
@@ -324,18 +381,18 @@ def check_and_upload():
         print(f"\nFound {len(files_to_upload)} new/updated file(s) to upload:")
         for mp4_file in files_to_upload:
             try:
-                upload_file(service, mp4_file, state)
+                await upload_file(service, mp4_file, state)
             except Exception as e:
                 print(f"Error uploading {mp4_file}: {str(e)}")
         
-        save_state(state)
+        await save_state(state)
     else:
         print("No new or updated files to upload")
 
 # ---------------------------
 # Scheduler Setup
 # ---------------------------
-def main(single_run=False):
+async def main(single_run=False):
     """
     Run video uploader in either single-run or continuous mode.
     Args:
@@ -343,12 +400,15 @@ def main(single_run=False):
     """
     print(f"Video uploader starting in {'single-run' if single_run else 'continuous'} mode")
     
+    # Initialize database
+    await db_manager.initialize()
+    
     # Always do initial check
-    check_and_upload()
+    await check_and_upload()
     
     if not single_run:
         # Only schedule periodic checks in continuous mode
-        schedule.every(1).minutes.do(check_and_upload)
+        schedule.every(1).minutes.do(lambda: asyncio.run(check_and_upload()))
         
         print("Video monitor is running in continuous mode. Press Ctrl+C to exit.")
         try:
@@ -371,4 +431,4 @@ if __name__ == '__main__':
     parser.add_argument('--single-run', action='store_true', help='Run once and exit (default: continuous mode)')
     args = parser.parse_args()
     
-    main(single_run=args.single_run)
+    asyncio.run(main(single_run=args.single_run))
