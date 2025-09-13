@@ -474,20 +474,28 @@ class UploadProcessor(BaseProcessor):
             # Load state from database
             state = await self._load_video_state()
             
-            # Find MP4 files to upload
-            all_files = self._find_mp4_files(self.video_folder)
-            
-            # Filter out already uploaded files
+            # Find all .mp4 files in assets/finished_videos and its subfolders
             files_to_upload = []
-            for file_path in all_files:
-                normalized_path = os.path.normpath(file_path)
-                if normalized_path in state:
-                    video_data = state[normalized_path]
-                    if (video_data.get('upload_status') == 'COMPLETED' and 
-                        video_data.get('drive_id')):
-                        self.log_step(f"Video {os.path.basename(file_path)} already uploaded. Skipping.")
-                        continue
-                files_to_upload.append(file_path)
+            finished_videos_dir = Path(self.video_folder)
+            
+            if not finished_videos_dir.exists():
+                self.log_step(f"Finished videos directory {self.video_folder} does not exist")
+                return True
+            
+            # Recursively find all .mp4 files
+            for mp4_file in finished_videos_dir.rglob("*.mp4"):
+                file_path = str(mp4_file)
+                filename = mp4_file.name
+                
+                # Check if already uploaded by looking for this specific file path in database
+                existing_videos = await db_manager.get_all_videos()
+                video_data = next((v for v in existing_videos if v.get('file_path') == file_path), None)
+                
+                if video_data and (video_data.get('upload_status') == 'COMPLETED' and video_data.get('drive_id')):
+                    self.log_step(f"Video {filename} already uploaded to Google Drive. Skipping.")
+                    continue
+                
+                files_to_upload.append((file_path, {'filename': filename, 'file_path': file_path}))
             
             if not files_to_upload:
                 self.log_step("No new videos to upload")
@@ -496,10 +504,12 @@ class UploadProcessor(BaseProcessor):
             self.log_step(f"Found {len(files_to_upload)} new videos to upload")
             
             # Upload each file
-            for file_path in files_to_upload:
+            for file_path, video_data in files_to_upload:
                 try:
                     file_id = await self._upload_video_file(self._drive_service, file_path, state)
                     if file_id:
+                        # Update database with upload status
+                        await db_manager.update_video_status(video_data['id'], 'COMPLETED', file_id)
                         self.uploaded_count += 1
                     else:
                         self.failed_count += 1

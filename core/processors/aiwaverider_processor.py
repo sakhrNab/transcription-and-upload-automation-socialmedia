@@ -113,12 +113,26 @@ class AIWaveriderProcessor(BaseProcessor):
             self.log_step("Starting AIWaverider Drive uploads")
             self.status = "processing"
             
-            # Get videos and thumbnails from database
-            videos = await db_manager.get_videos_by_status('COMPLETED')
-            thumbnails = await db_manager.get_thumbnails_by_status('COMPLETED')
+            # Find all .mp4 files in assets/finished_videos and its subfolders
+            finished_videos_dir = Path("assets/finished_videos")
+            videos = []
+            
+            if finished_videos_dir.exists():
+                for mp4_file in finished_videos_dir.rglob("*.mp4"):
+                    file_path = str(mp4_file)
+                    filename = mp4_file.name
+                    videos.append({
+                        'filename': filename,
+                        'file_path': file_path,
+                        'transcription_status': 'COMPLETED'  # Assume completed since it's in finished_videos
+                    })
+            
+            # Get thumbnails from database
+            thumbnails = await db_manager.get_all_thumbnails()
+            thumbnails = [t for t in thumbnails if t.get('video_filename')]  # Thumbnails with video association
             
             if not videos and not thumbnails:
-                self.log_step("No completed videos or thumbnails found in database")
+                self.log_step("No completed videos or thumbnails found")
                 return True
             
             # Get existing files from AIWaverider Drive to avoid duplicates
@@ -135,7 +149,13 @@ class AIWaveriderProcessor(BaseProcessor):
                 filename = video.get('filename', '')
                 file_path = video.get('file_path', '')
                 
-                if filename not in existing_videos and file_path and os.path.exists(file_path):
+                # Check if already uploaded to AIWaverider by looking in database
+                existing_videos_db = await db_manager.get_all_videos()
+                video_data = next((v for v in existing_videos_db if v.get('file_path') == file_path), None)
+                
+                if (filename not in existing_videos and 
+                    file_path and os.path.exists(file_path) and
+                    (not video_data or video_data.get('aiwaverider_status') != 'COMPLETED')):
                     upload_tasks.append(('video', file_path, video))
             
             # Add thumbnail upload tasks

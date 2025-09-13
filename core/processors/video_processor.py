@@ -103,57 +103,72 @@ class VideoProcessor(BaseProcessor):
             self.log_step(f"Processing {len(urls)} URLs")
             self.status = "processing"
             
-            # Load existing transcription state
-            transcription_state = await self._load_transcription_state()
+            # Load existing videos from database to check for already downloaded videos
+            existing_videos = await db_manager.get_all_videos()
+            existing_urls = {video.get('url', '') for video in existing_videos if video.get('url')}
+            existing_video_ids = {video.get('video_id', '') for video in existing_videos if video.get('video_id')}
             
-            # Filter out already processed URLs
+            self.log_step(f"Found {len(existing_videos)} existing videos in database")
+            self.log_step(f"Existing URLs: {len(existing_urls)}")
+            self.log_step(f"Existing video IDs: {len(existing_video_ids)}")
+            
+            # Filter out already processed URLs (by URL or video ID)
             new_urls = []
+            skipped_count = 0
+            
             for url in urls:
                 video_id = self._extract_video_id(url)
-                if video_id and transcription_state.get(video_id, {}).get('status') != 'completed':
-                    new_urls.append(url)
+                
+                # Check if URL or video ID already exists in database
+                if url in existing_urls:
+                    self.log_step(f"Skipping already processed video by URL: {url}")
+                    skipped_count += 1
+                    continue
+                elif video_id and video_id in existing_video_ids:
+                    self.log_step(f"Skipping already processed video by ID: {video_id}")
+                    skipped_count += 1
+                    continue
+                    
+                new_urls.append(url)
             
             if not new_urls:
-                self.log_step("No new URLs to process - all have been transcribed")
+                self.log_step(f"No new URLs to process - {skipped_count} already processed, {len(urls)} total")
                 return True
             
-            # Determine optimal concurrency based on GPU availability and system resources
-            max_concurrent = self._get_optimal_concurrency()
-            self.log_step(f"Using parallel processing with max {max_concurrent} concurrent videos")
+            self.log_step(f"Found {len(new_urls)} new URLs to process ({skipped_count} already processed)")
             
-            # Create semaphore to limit concurrent processing
-            semaphore = asyncio.Semaphore(max_concurrent)
+            # Process URLs sequentially (one at a time)
+            self.log_step(f"Using sequential processing - videos will be processed one at a time")
             
-            async def process_with_semaphore(url: str, index: int) -> bool:
-                """Process a single video with semaphore control"""
-                async with semaphore:
-                    try:
-                        self.log_step(f"Starting parallel processing for video {index}")
-                        success = await self._process_single_video(url, index)
-                        if success:
-                            self.processed_count += 1
-                        else:
-                            self.failed_count += 1
-                        return success
-                    except Exception as e:
-                        self.log_error(f"Error processing URL {url}", e)
+            # Process each URL sequentially
+            results = []
+            consecutive_failures = [0]  # Use list to allow modification in retry function
+            max_consecutive_failures = 3  # Stop after 3 consecutive failures
+            
+            for i, url in enumerate(new_urls, 1):
+                # Check if we should stop before starting this video
+                if consecutive_failures[0] >= max_consecutive_failures:
+                    self.log_step(f"Stopping download process after {consecutive_failures[0]} consecutive failures")
+                    self.log_step("Moving to upload processing for already downloaded videos")
+                    break
+                
+                try:
+                    self.log_step(f"Starting sequential processing for video {i}")
+                    success = await self._process_single_video_with_retry(url, i, consecutive_failures, max_consecutive_failures)
+                    if success:
+                        self.processed_count += 1
+                    else:
                         self.failed_count += 1
-                        return False
-            
-            # Process URLs in parallel
-            tasks = [process_with_semaphore(url, i) for i, url in enumerate(new_urls, 1)]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Process results
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    self.log_error(f"Video processing task {i} failed: {str(result)}")
+                        
+                    results.append(success)
+                except Exception as e:
+                    self.log_error(f"Error processing video {i}: {str(e)}")
                     self.failed_count += 1
-                elif not result:
-                    self.failed_count += 1
+                    consecutive_failures[0] += 1
+                    results.append(False)
             
             self.status = "completed"
-            self.log_step(f"Parallel video processing completed: {self.processed_count} successful, {self.failed_count} failed")
+            self.log_step(f"Sequential video processing completed: {self.processed_count} successful, {self.failed_count} failed")
             return self.failed_count == 0
             
         except Exception as e:
@@ -191,6 +206,59 @@ class VideoProcessor(BaseProcessor):
         self.log_step(f"Auto-detected optimal concurrency: {optimal} (CPU cores: {cpu_cores}, GPU: {torch.cuda.is_available()})")
         return optimal
     
+    async def _process_single_video_with_retry(self, url: str, index: int, consecutive_failures_ref: list, max_consecutive_failures: int) -> bool:
+        """Process a single video with retry logic"""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    self.log_step(f"Retry attempt {attempt + 1}/{max_retries} for video {index}")
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                
+                result = await self._process_single_video(url, index)
+                if result:
+                    consecutive_failures_ref[0] = 0  # Reset on success
+                    return True
+                else:
+                    # Video processing failed, increment consecutive failures
+                    consecutive_failures_ref[0] += 1
+                    self.log_step(f"Video {index} failed, consecutive failures: {consecutive_failures_ref[0]}")
+                    
+                    # Check if we should stop after this failure
+                    if consecutive_failures_ref[0] >= max_consecutive_failures:
+                        self.log_step(f"Stopping download process after {consecutive_failures_ref[0]} consecutive failures")
+                        self.log_step("Moving to upload processing for already downloaded videos")
+                        return False
+                    
+                    # Continue to next attempt if we haven't reached max retries
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        self.log_step(f"Skipping video {index} after {max_retries} failed attempts")
+                        return False
+                
+            except Exception as e:
+                self.log_error(f"Attempt {attempt + 1}/{max_retries} failed for video {index}: {str(e)}")
+                # Exception occurred, increment consecutive failures
+                consecutive_failures_ref[0] += 1
+                self.log_step(f"Video {index} failed with exception, consecutive failures: {consecutive_failures_ref[0]}")
+                
+                # Check if we should stop after this failure
+                if consecutive_failures_ref[0] >= max_consecutive_failures:
+                    self.log_step(f"Stopping download process after {consecutive_failures_ref[0]} consecutive failures")
+                    self.log_step("Moving to upload processing for already downloaded videos")
+                    return False
+                
+                # Continue to next attempt if we haven't reached max retries
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    self.log_step(f"Skipping video {index} after {max_retries} failed attempts")
+                    return False
+        
+        return False
+
     async def _process_single_video(self, url: str, index: int) -> bool:
         """Process a single video through the complete pipeline"""
         start_time = time.time()
@@ -247,7 +315,7 @@ class VideoProcessor(BaseProcessor):
                 
         except Exception as e:
             self.log_error(f"Error processing video {index}: {str(e)}")
-            return False
+            raise  # Re-raise the exception so retry logic can catch it
         finally:
             processing_time = time.time() - start_time
             self.log_step(f"Video {index} processing completed in {processing_time:.2f}s")

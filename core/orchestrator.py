@@ -25,7 +25,7 @@ from core.processors.upload_processor import UploadProcessor
 from core.processors.thumbnail_processor import ThumbnailProcessor
 from core.processors.aiwaverider_processor import AIWaveriderProcessor
 from core.processors.sheets_processor import SheetsProcessor
-from core.processors.excel_processor import ExcelProcessor
+from core.processors.transcripts_sheets_processor import TranscriptsSheetsProcessor
 
 
 class SocialMediaOrchestrator:
@@ -38,7 +38,7 @@ class SocialMediaOrchestrator:
         self.thumbnail_processor = ThumbnailProcessor()
         self.aiwaverider_processor = AIWaveriderProcessor()
         self.sheets_processor = SheetsProcessor()
-        self.excel_processor = ExcelProcessor()
+        self.transcripts_sheets_processor = TranscriptsSheetsProcessor()
         
         self.processing_pipeline = [
             self.video_processor,
@@ -46,7 +46,7 @@ class SocialMediaOrchestrator:
             self.thumbnail_processor,
             self.aiwaverider_processor,
             self.sheets_processor,
-            self.excel_processor
+            self.transcripts_sheets_processor
         ]
     
     async def initialize(self):
@@ -94,8 +94,12 @@ class SocialMediaOrchestrator:
             logger.log_step("Step 1: Video processing and transcription")
             video_results = await self.video_processor.process_urls(urls)
             if not video_results:
-                logger.log_error("Video processing failed")
-                return False
+                logger.log_step("Video processing had issues, but continuing with uploads for completed videos")
+            else:
+                logger.log_step("Video processing completed successfully")
+            
+            # Always continue with uploads regardless of video processing results
+            logger.log_step("Continuing with upload processing for any successfully processed videos")
             
             # Step 2: Upload Processing (parallel with thumbnails)
             logger.log_step("Step 2: Upload processing")
@@ -128,10 +132,10 @@ class SocialMediaOrchestrator:
                 return False
             
             # Step 5: Excel Generation and Upload
-            logger.log_step("Step 5: Excel file generation and upload")
-            excel_result = await self.excel_processor.generate_and_upload_excel()
-            if not excel_result:
-                logger.log_error("Excel generation and upload failed")
+            logger.log_step("Step 5: Video transcripts sheet update")
+            transcripts_result = await self.transcripts_sheets_processor.update_transcripts_sheet()
+            if not transcripts_result:
+                logger.log_error("Transcripts sheet update failed")
                 return False
             
             logger.log_step("Pipeline processing completed successfully")

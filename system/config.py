@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     master_sheet_id: str = Field(default="1HNKPIhq1kB1xoS52cM2U7KOdiJS8pqiQ7j_fbTQOUPI", description="Google Sheets ID for master tracking")
     master_sheet_name: str = Field(default="socialmedia_tracker", description="Google Sheets name")
     
+    # Video Transcripts Sheet Configuration
+    transcripts_sheet_id: str = Field(default="", description="Google Sheets ID for video transcripts (auto-created if empty)")
+    transcripts_sheet_name: str = Field(default="video_transcripts", description="Google Sheets name for video transcripts")
+    
     # AIWaverider Configuration
     aiwaverider_token: str = Field(default="", description="AIWaverider API token")
     aiwaverider_upload_url: str = Field(
