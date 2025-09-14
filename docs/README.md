@@ -159,6 +159,7 @@ SCENARIO 3: MANUAL UPLOAD PROCESSING
 - **SQLite Database**: Robust state management with comprehensive metadata
 - **Master Tracking Sheet**: Real-time Google Sheet with all content status and thumbnails
 - **Video Transcripts Sheet**: Dedicated Google Sheet for video transcripts with 31 columns
+- **Transcript Synchronization**: Automatic sync between master sheet and transcripts sheet
 - **Local Backup**: Automatic local backup to `assets/downloads/socialmedia/`
 - **Smart Updates**: Updates existing entries, appends new ones (never overwrites existing data)
 - **Duplicate Prevention**: Smart file checking to avoid re-uploads
@@ -172,6 +173,10 @@ SCENARIO 3: MANUAL UPLOAD PROCESSING
 ### Advanced Features
 - **GPU Acceleration**: CUDA support for faster transcription
 - **Parallel Processing**: Concurrent video processing with configurable limits
+- **Standalone Scripts**: Independent scripts for specific tasks
+- **Duplicate Prevention**: Comprehensive duplicate checking across all platforms
+- **Transcript Synchronization**: Automatic sync between master sheet and transcripts sheet
+- **Smart Upload Logic**: Intelligent file checking and status management
 - **Error Recovery**: Automatic retries with exponential backoff
 - **Circuit Breaker**: Prevents cascading failures
 - **Health Monitoring**: Comprehensive metrics and status tracking
@@ -233,7 +238,43 @@ python download_only.py --urls "https://instagram.com/p/example1" "https://insta
 download_videos.bat
 ```
 
-#### 3. Continuous Scanner (Background Monitoring)
+#### 3. Upload-Only Mode (Upload Existing Videos)
+```bash
+# Upload all videos from assets/finished_videos/
+python upload_only.py
+
+# Upload specific videos
+python upload_only.py --videos "video1.mp4" "video2.mp4"
+
+# Upload from specific folder
+python upload_only.py --folder "path/to/videos"
+
+# Test mode (dry run)
+python upload_only.py --test
+
+# Or use the batch file (Windows)
+upload_videos.bat
+```
+
+#### 4. Advanced Upload Options
+```bash
+# Upload by status
+python upload_specific.py --status PENDING
+
+# Upload by filename pattern
+python upload_specific.py --pattern "rick"
+
+# Upload recent videos (last 24 hours)
+python upload_specific.py --recent 24
+
+# List all uploadable videos
+python upload_specific.py --list
+
+# Upload specific files
+python upload_specific.py --videos "video1.mp4" "video2.mp4"
+```
+
+#### 5. Continuous Scanner (Background Monitoring)
 ```bash
 # Start continuous scanner
 python continuous_scanner.py
@@ -242,10 +283,50 @@ python continuous_scanner.py
 start_scanner.bat
 ```
 
-#### 4. Manual Upload Processing
+#### 6. Manual Upload Processing
 1. Place edited videos in `assets/finished_videos/`
 2. The continuous scanner will automatically detect and upload them
 3. Check the logs for upload status
+
+## 🚀 Standalone Scripts
+
+The system includes multiple standalone scripts that can be run independently for specific tasks:
+
+### Download Scripts
+- **`download_only.py`** - Download videos without transcription or uploads
+- **`download_videos.bat`** - Windows batch wrapper for download-only mode
+
+### Upload Scripts
+- **`upload_only.py`** - Upload existing videos to Google Drive and AIWaverider
+- **`upload_videos.bat`** - Windows batch wrapper for upload-only mode
+- **`upload_specific.py`** - Advanced upload options with filtering
+
+### Background Services
+- **`continuous_scanner.py`** - Auto-upload service for finished videos
+- **`start_scanner.bat`** - Windows batch launcher for scanner
+
+### Utility Scripts
+- **`check_gpu.py`** - GPU detection and Whisper device testing
+- **`update_video_metadata.py`** - Extract metadata from transcript files
+- **`test_scanner.py`** - Test scanner functionality
+
+### Usage Examples
+```bash
+# Download videos only
+python download_only.py --max-videos 5
+
+# Upload all finished videos
+python upload_only.py
+
+# Upload specific videos
+python upload_specific.py --pattern "rick"
+
+# Check GPU capabilities
+python check_gpu.py
+
+# Start background scanner
+python continuous_scanner.py
+```
 
 ## 📁 Project Structure
 
@@ -253,10 +334,15 @@ start_scanner.bat
 Transcripe-autoDetect-Video-upload-to-gDrive/
 ├── main.py                          # Main entry point (5 videos max)
 ├── download_only.py                 # Download-only script (unlimited videos)
+├── upload_only.py                   # Upload-only script for existing videos
+├── upload_specific.py               # Advanced upload options with filtering
 ├── continuous_scanner.py            # Continuous file monitoring service
-├── start_scanner.bat               # Windows batch file to start scanner
-├── download_videos.bat             # Windows batch file for download-only mode
+├── check_gpu.py                    # GPU detection and testing utility
+├── update_video_metadata.py        # Metadata extraction utility
 ├── test_scanner.py                 # Scanner testing utility
+├── download_videos.bat             # Windows batch file for download-only mode
+├── upload_videos.bat               # Windows batch file for upload-only mode
+├── start_scanner.bat               # Windows batch file to start scanner
 ├── requirements.txt                # Python dependencies
 ├── .env                           # Environment variables (create this)
 ├── config/
@@ -423,6 +509,75 @@ Tracks upload status for videos and thumbnails:
 - Secure credential storage
 - Data validation and sanitization
 - Backup and recovery systems
+
+## 📝 Transcript Synchronization
+
+The system now includes comprehensive transcript synchronization between sheets:
+
+### Master Sheet Integration
+- **New "transcript" column** added to master tracking sheet (column 20)
+- **Automatic sync** of transcript data from database to master sheet
+- **Real-time updates** when videos are processed or uploaded
+
+### Transcripts Sheet Integration
+- **Dedicated "Transcript" column** in transcripts sheet (column 25)
+- **Comprehensive metadata** including all video details and transcript text
+- **Append-only updates** to prevent data loss
+
+### Synchronization Features
+- **Bidirectional sync** between master sheet and transcripts sheet
+- **Database-driven** - single source of truth for all transcript data
+- **Duplicate prevention** - smart checking to avoid re-uploads
+- **Local backups** - CSV and JSON files for offline access
+
+### Usage
+```bash
+# Transcripts are automatically synced during normal processing
+python main.py
+
+# Manual sync of existing transcripts
+python -c "
+import asyncio
+from core.processors.sheets_processor import SheetsProcessor
+async def sync():
+    processor = SheetsProcessor()
+    await processor.initialize()
+    await processor.sync_transcripts_to_master_sheet()
+    await processor.cleanup()
+asyncio.run(sync())
+"
+```
+
+## 🛡️ Duplicate Prevention System
+
+The system includes comprehensive duplicate prevention across all platforms:
+
+### Multi-Layer Duplicate Detection
+- **Database Checking**: Verifies existing uploads in local database
+- **Google Drive Checking**: Searches for files with same name and content hash
+- **AIWaverider Checking**: Verifies file existence on AIWaverider Drive
+- **Session State**: Prevents re-uploading in same session
+
+### Duplicate Prevention Features
+- **Filename Matching**: Checks for identical filenames
+- **Content Hash Verification**: SHA256 hash comparison for exact duplicates
+- **Status Verification**: Checks upload completion status
+- **Smart Skipping**: Clear logging of why files are skipped
+
+### Upload Status Messages
+```
+✅ UPLOAD: video.mp4 - No duplicates found, proceeding with upload
+✅ SUCCESS: video.mp4 uploaded successfully (ID: 1ABC123)
+⏭️ SKIP: duplicate.mp4 - File with same name already exists in Drive (ID: 1XYZ789)
+⏭️ SKIP: content.mp4 - File with same content already exists in Drive (ID: 1DEF456)
+❌ FAILED: error.mp4 - Upload failed, no file ID returned
+```
+
+### Benefits
+- **No Wasted Bandwidth**: Prevents unnecessary re-uploads
+- **Clear Feedback**: Users know exactly why files are skipped
+- **Performance Optimization**: Skips unnecessary API calls
+- **Data Integrity**: Maintains consistent state across all systems
 
 ## 🚨 Troubleshooting
 
