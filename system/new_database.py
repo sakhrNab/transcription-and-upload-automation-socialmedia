@@ -667,6 +667,28 @@ class NewDatabaseManager:
         except Exception as e:
             logger.log_error(f"Error getting upload tracking by filename: {str(e)}")
             return None
+    
+    async def get_all_videos_with_transcripts(self) -> List[Dict[str, Any]]:
+        """Get all videos that have transcripts"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute("""
+                    SELECT * FROM video_transcripts 
+                    WHERE transcription_text IS NOT NULL 
+                    AND transcription_text != '' 
+                    AND transcription_status = 'COMPLETED'
+                    ORDER BY created_at DESC
+                """)
+                rows = await cursor.fetchall()
+                
+                if rows:
+                    cursor = await conn.execute("PRAGMA table_info(video_transcripts)")
+                    columns = [col[1] for col in await cursor.fetchall()]
+                    return [dict(zip(columns, row)) for row in rows]
+                return []
+        except Exception as e:
+            logger.log_error(f"Error getting videos with transcripts: {str(e)}")
+            return []
 
 # Global instance
 new_db_manager = NewDatabaseManager()
