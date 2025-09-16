@@ -48,14 +48,130 @@ class NewDatabaseManager:
     
     async def _create_tables(self):
         """Create database tables with new schema"""
-        # Read and execute new schema
-        with open('new_database_schema.sql', 'r') as f:
-            schema_sql = f.read()
+        import os
+        from pathlib import Path
+        
+        # Find schema file - try multiple locations
+        schema_paths = [
+            'new_database_schema.sql',  # Current directory
+            '../new_database_schema.sql',  # Parent directory
+            Path(__file__).parent.parent / 'new_database_schema.sql',  # Project root
+        ]
+        
+        schema_sql = None
+        for schema_path in schema_paths:
+            try:
+                with open(schema_path, 'r') as f:
+                    schema_sql = f.read()
+                    logger.log_step(f"Found schema file at: {schema_path}")
+                    break
+            except FileNotFoundError:
+                continue
+        
+        if not schema_sql:
+            # If schema file not found, create tables manually
+            logger.log_step("Schema file not found, creating tables manually")
+            await self._create_tables_manually()
+            return
         
         conn = await aiosqlite.connect(self.db_path)
         await conn.executescript(schema_sql)
         await conn.commit()
         await conn.close()
+    
+    async def _create_tables_manually(self):
+        """Create tables manually if schema file is not found"""
+        conn = await aiosqlite.connect(self.db_path)
+        
+        # Create video_transcripts table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS video_transcripts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id TEXT UNIQUE NOT NULL,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                url TEXT,
+                title TEXT,
+                description TEXT,
+                username TEXT,
+                uploader_id TEXT,
+                channel_id TEXT,
+                channel_url TEXT,
+                platform TEXT,
+                duration INTEGER,
+                width INTEGER,
+                height INTEGER,
+                fps REAL,
+                format_id TEXT,
+                view_count INTEGER,
+                like_count INTEGER,
+                comment_count INTEGER,
+                upload_date TEXT,
+                thumbnail_url TEXT,
+                webpage_url TEXT,
+                extractor TEXT,
+                transcription_text TEXT,
+                transcription_status TEXT DEFAULT 'PENDING',
+                smart_name TEXT,
+                transcript_file_path TEXT,
+                audio_file_path TEXT,
+                thumbnail_file_path TEXT,
+                video_file_size_mb REAL,
+                transcript_word_count INTEGER,
+                processing_time_seconds REAL,
+                notes TEXT,
+                error_details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create upload_tracking table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS upload_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_hash TEXT,
+                gdrive_id TEXT,
+                gdrive_url TEXT,
+                gdrive_upload_status TEXT DEFAULT 'PENDING',
+                gdrive_upload_date TIMESTAMP,
+                gdrive_folder_id TEXT,
+                aiwaverider_id TEXT,
+                aiwaverider_url TEXT,
+                aiwaverider_upload_status TEXT DEFAULT 'PENDING',
+                aiwaverider_upload_date TIMESTAMP,
+                aiwaverider_folder_path TEXT,
+                upload_attempts INTEGER DEFAULT 0,
+                last_upload_attempt TIMESTAMP,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(video_id, file_type)
+            )
+        """)
+        
+        # Create processing_queue table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS processing_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_type TEXT NOT NULL,
+                task_data TEXT NOT NULL,
+                status TEXT DEFAULT 'PENDING',
+                priority INTEGER DEFAULT 0,
+                retry_count INTEGER DEFAULT 0,
+                max_retries INTEGER DEFAULT 3,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        await conn.commit()
+        await conn.close()
+        logger.log_step("Tables created manually")
     
     @asynccontextmanager
     async def get_connection(self):

@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Social Media Content Processor</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <i class="fas fa-video"></i>
+                    <h1>Social Media Content Processor</h1>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" id="themeToggle">
+                        <i class="fas fa-moon"></i>
+                    </button>
+                    <button class="btn btn-primary" id="masterRunBtn">
+                        <i class="fas fa-play"></i>
+                        Run All Processes
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Progress Bar -->
+        <div class="progress-container">
+            <div class="progress-bar">
+                <div class="progress-fill" id="masterProgress"></div>
+            </div>
+            <div class="progress-text" id="progressText">Ready to start</div>
+        </div>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Tab Navigation -->
+            <nav class="tab-navigation">
+                <button class="tab-btn active" data-tab="download">
+                    <i class="fas fa-download"></i>
+                    <span>Download</span>
+                    <div class="tab-status" id="downloadStatus"></div>
+                </button>
+                <button class="tab-btn" data-tab="transcribe">
+                    <i class="fas fa-microphone"></i>
+                    <span>Transcribe</span>
+                    <div class="tab-status" id="transcribeStatus"></div>
+                </button>
+                <button class="tab-btn" data-tab="upload">
+                    <i class="fas fa-upload"></i>
+                    <span>Upload</span>
+                    <div class="tab-status" id="uploadStatus"></div>
+                </button>
+            </nav>
+
+            <!-- Tab Content -->
+            <div class="tab-content">
+                <!-- Download Tab -->
+                <div class="tab-panel active" id="downloadTab">
+                    <div class="panel-header">
+                        <h2>Download Videos</h2>
+                        <p>Select URLs to download from your urls.txt file</p>
+                    </div>
+                    
+                    <div class="panel-content">
+                        <!-- URL Selection -->
+                        <div class="section">
+                            <div class="section-header">
+                                <h3>URL Selection</h3>
+                                <div class="section-actions">
+                                    <button class="btn btn-outline" id="refreshUrls">
+                                        <i class="fas fa-sync-alt"></i>
+                                        Refresh
+                                    </button>
+                                    <button class="btn btn-outline" id="selectAllUrls">
+                                        <i class="fas fa-check-square"></i>
+                                        Select All
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <!-- Custom URL Input -->
+                            <div class="custom-url-section">
+                                <label for="customUrlInput" class="form-label">Add Custom URL:</label>
+                                <div class="input-group">
+                                    <input type="url" id="customUrlInput" class="form-input" placeholder="https://www.instagram.com/p/example...">
+                                    <button class="btn btn-secondary" id="addCustomUrlBtn">
+                                        <i class="fas fa-plus"></i>
+                                        Add URL
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <div class="url-list" id="urlList">
+                                <!-- URLs will be loaded here -->
+                            </div>
+                            <div class="selection-info">
+                                <span class="selection-count">0 URLs selected</span>
+                                <span class="max-warning">Maximum 5 videos per run</span>
+                            </div>
+                        </div>
+
+                        <!-- Download Actions -->
+                        <div class="section">
+                            <div class="action-buttons">
+                                <button class="btn btn-primary btn-large" id="startDownload">
+                                    <i class="fas fa-download"></i>
+                                    Start Download
+                                </button>
+                                <button class="btn btn-secondary" id="nextToTranscribe">
+                                    Next: Transcribe
+                                    <i class="fas fa-arrow-right"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Download Progress -->
+                        <div class="section" id="downloadProgressSection" style="display: none;">
+                            <h3>Download Progress</h3>
+                            <div class="progress-grid" id="downloadProgressGrid">
+                                <!-- Progress items will be added here -->
+                            </div>
+                        </div>
+
+                        <!-- Downloaded Videos -->
+                        <div class="section" id="downloadedVideosSection" style="display: none;">
+                            <h3>Downloaded Videos</h3>
+                            <div class="video-grid" id="downloadedVideosGrid">
+                                <!-- Downloaded videos will be displayed here -->
+                            </div>
+                        </div>
+
+                        <!-- Download Data Section -->
+                        <div class="data-section">
+                            <div class="data-header">
+                                <h3>Downloaded Videos Data</h3>
+                                <div class="data-actions">
+                                    <div class="view-toggle">
+                                        <button class="btn btn-outline active" id="downloadDbView" data-view="db">
+                                            <i class="fas fa-database"></i>
+                                            DB View
+                                        </button>
+                                        <button class="btn btn-outline" id="downloadSheetView" data-view="sheet">
+                                            <i class="fas fa-table"></i>
+                                            Sheet View
+                                        </button>
+                                    </div>
+                                    <button class="btn btn-outline" id="refreshDownloadData">
+                                        <i class="fas fa-sync-alt"></i>
+                                        Refresh Data
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="data-table-container">
+                                <table class="data-table" id="downloadDataTable">
+                                    <thead>
+                                        <tr>
+                                            <th>Video ID</th>
+                                            <th>Video Name</th>
+                                            <th>Download Status</th>
+                                            <th>File Size</th>
+                                            <th>Download Date</th>
+                                            <th>DB Status</th>
+                                            <th>Sheets Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="downloadDataBody">
+                                        <!-- Data will be loaded here -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Transcribe Tab -->
+                <div class="tab-panel" id="transcribeTab">
+                    <div class="panel-header">
+                        <h2>Transcribe Videos</h2>
+                        <p>Select downloaded videos to transcribe using Whisper AI</p>
+                    </div>
+                    
+                    <div class="panel-content">
+                        <!-- Video Selection -->
+                        <div class="section">
+                            <div class="section-header">
+                                <h3>Video Selection</h3>
+                                <div class="section-actions">
+                                    <button class="btn btn-outline" id="refreshVideos">
+                                        <i class="fas fa-sync-alt"></i>
+                                        Refresh
+                                    </button>
+                                    <button class="btn btn-outline" id="selectAllVideos">
+                                        <i class="fas fa-check-square"></i>
+                                        Select All
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="video-list" id="videoList">
+                                <!-- Videos will be loaded here -->
+                            </div>
+                            <div class="selection-info">
+                                <span class="selection-count">0 videos selected</span>
+                                <span class="gpu-info">GPU acceleration available</span>
+                            </div>
+                        </div>
+
+                        <!-- Transcribe Actions -->
+                        <div class="section">
+                            <div class="action-buttons">
+                                <button class="btn btn-primary btn-large" id="startTranscribe">
+                                    <i class="fas fa-microphone"></i>
+                                    Start Transcription
+                                </button>
+                                <button class="btn btn-secondary" id="nextToUpload">
+                                    Next: Upload
+                                    <i class="fas fa-arrow-right"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Transcription Progress -->
+                        <div class="section" id="transcribeProgressSection" style="display: none;">
+                            <h3>Transcription Progress</h3>
+                            <div class="progress-grid" id="transcribeProgressGrid">
+                                <!-- Progress items will be added here -->
+                            </div>
+                        </div>
+
+                        <!-- Transcribed Videos -->
+                        <div class="section" id="transcribedVideosSection" style="display: none;">
+                            <h3>Transcribed Videos</h3>
+                            <div class="video-grid" id="transcribedVideosGrid">
+                                <!-- Transcribed videos will be displayed here -->
+                            </div>
+                        </div>
+
+                        <!-- Transcription Data Section -->
+                        <div class="data-section">
+                            <div class="data-header">
+                                <h3>Transcription Data</h3>
+                                <div class="data-actions">
+                                    <div class="view-toggle">
+                                        <button class="btn btn-outline active" id="transcribeDbView" data-view="db">
+                                            <i class="fas fa-database"></i>
+                                            DB View
+                                        </button>
+                                        <button class="btn btn-outline" id="transcribeSheetView" data-view="sheet">
+                                            <i class="fas fa-table"></i>
+                                            Sheet View
+                                        </button>
+                                    </div>
+                                    <button class="btn btn-outline" id="refreshTranscribeData">
+                                        <i class="fas fa-sync-alt"></i>
+                                        Refresh Data
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="data-table-container">
+                                <table class="data-table" id="transcribeDataTable">
+                                    <thead>
+                                        <tr>
+                                            <th>Video ID</th>
+                                            <th>Video Name</th>
+                                            <th>Transcription Status</th>
+                                            <th>Transcript Length</th>
+                                            <th>Processing Time</th>
+                                            <th>DB Status</th>
+                                            <th>Sheets Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="transcribeDataBody">
+                                        <!-- Data will be loaded here -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Upload Tab -->
+                <div class="tab-panel" id="uploadTab">
+                    <div class="panel-header">
+                        <h2>Upload Finished Videos</h2>
+                        <p>Select finished videos to upload to Google Drive and AIWaverider</p>
+                    </div>
+                    
+                    <div class="panel-content">
+                        <!-- Video Selection -->
+                        <div class="section">
+                            <div class="section-header">
+                                <h3>Finished Videos</h3>
+                                <div class="section-actions">
+                                    <button class="btn btn-outline" id="refreshFinishedVideos">
+                                        <i class="fas fa-sync-alt"></i>
+                                        Refresh
+                                    </button>
+                                    <button class="btn btn-outline" id="selectAllFinishedVideos">
+                                        <i class="fas fa-check-square"></i>
+                                        Select All
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="video-list" id="finishedVideoList">
+                                <!-- Finished videos will be loaded here -->
+                            </div>
+                            <div class="selection-info">
+                                <span class="selection-count">0 videos selected</span>
+                                <span class="upload-info">Uploads to both Google Drive and AIWaverider</span>
+                            </div>
+                        </div>
+
+                        <!-- Thumbnails Selection -->
+                        <div class="section">
+                            <div class="section-header">
+                                <h3>Thumbnails</h3>
+                                <div class="section-actions">
+                                    <button class="btn btn-outline" id="refreshThumbnails">
+                                        <i class="fas fa-sync-alt"></i>
+                                        Refresh
+                                    </button>
+                                    <button class="btn btn-outline" id="selectAllThumbnails">
+                                        <i class="fas fa-check-square"></i>
+                                        Select All
+                                    </button>
+                                    <button class="btn btn-outline" id="toggleThumbnails">
+                                        <i class="fas fa-chevron-down"></i>
+                                        <span>Show Thumbnails</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="thumbnail-list" id="thumbnailList" style="display: none;">
+                                <!-- Thumbnails will be loaded here -->
+                            </div>
+                            <div class="selection-info">
+                                <span class="selection-count">0 thumbnails selected</span>
+                                <span class="upload-info">Uploads thumbnails to Google Drive and AIWaverider</span>
+                            </div>
+                        </div>
+
+                        <!-- Upload Actions -->
+                        <div class="section">
+                            <div class="action-buttons">
+                                <button class="btn btn-primary btn-large" id="startUpload">
+                                    <i class="fas fa-upload"></i>
+                                    Start Upload
+                                </button>
+                                <button class="btn btn-success" id="completeProcess">
+                                    <i class="fas fa-check"></i>
+                                    Complete Process
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Upload Progress -->
+                        <div class="section" id="uploadProgressSection" style="display: none;">
+                            <h3>Upload Progress</h3>
+                            <div class="progress-grid" id="uploadProgressGrid">
+                                <!-- Progress items will be added here -->
+                            </div>
+                        </div>
+
+                        <!-- Uploaded Videos -->
+                        <div class="section" id="uploadedVideosSection" style="display: none;">
+                            <h3>Uploaded Videos</h3>
+                            <div class="video-grid" id="uploadedVideosGrid">
+                                <!-- Uploaded videos will be displayed here -->
+                            </div>
+                        </div>
+
+                        <!-- Upload Data Section -->
+                        <div class="data-section">
+                            <div class="data-header">
+                                <h3>Upload Data</h3>
+                                <div class="data-actions">
+                                    <div class="view-toggle">
+                                        <button class="btn btn-outline active" id="uploadDbView" data-view="db">
+                                            <i class="fas fa-database"></i>
+                                            DB View
+                                        </button>
+                                        <button class="btn btn-outline" id="uploadSheetView" data-view="sheet">
+                                            <i class="fas fa-table"></i>
+                                            Sheet View
+                                        </button>
+                                    </div>
+                                    <button class="btn btn-outline" id="refreshUploadData">
+                                        <i class="fas fa-sync-alt"></i>
+                                        Refresh Data
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="data-table-container">
+                                <table class="data-table" id="uploadDataTable">
+                                    <thead>
+                                        <tr>
+                                            <th>Video ID</th>
+                                            <th>Video Name</th>
+                                            <th>Google Drive Status</th>
+                                            <th>AIWaverider Status</th>
+                                            <th>Thumbnail Status</th>
+                                            <th>Upload Date</th>
+                                            <th>DB Status</th>
+                                            <th>Sheets Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="uploadDataBody">
+                                        <!-- Data will be loaded here -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Status Panel -->
+        <aside class="status-panel" id="statusPanel">
+            <!-- Process Status Section -->
+            <div class="status-section">
+                <div class="status-header">
+                    <h3>Process Status</h3>
+                    <button class="btn btn-ghost" id="toggleProcessStatus">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                </div>
+                <div class="status-content" id="processStatusContent">
+                    <div class="status-item">
+                        <div class="status-label">Downloads</div>
+                        <div class="status-value" id="downloadStatusValue">
+                            <i class="fas fa-clock"></i>
+                            <span>0 completed</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">Transcriptions</div>
+                        <div class="status-value" id="transcribeStatusValue">
+                            <i class="fas fa-clock"></i>
+                            <span>0 completed</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">Uploads</div>
+                        <div class="status-value" id="uploadStatusValue">
+                            <i class="fas fa-clock"></i>
+                            <span>0 completed</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">Database Updates</div>
+                        <div class="status-value success" id="dbUpdateStatus">
+                            <i class="fas fa-check-circle"></i>
+                            <span>Up to date</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">Sheets Updates</div>
+                        <div class="status-value success" id="sheetsUpdateStatus">
+                            <i class="fas fa-check-circle"></i>
+                            <span>Up to date</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Status Section -->
+            <div class="status-section">
+                <div class="status-header">
+                    <h3>System Status</h3>
+                    <button class="btn btn-ghost" id="toggleSystemStatus">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                </div>
+                <div class="status-content" id="systemStatusContent">
+                    <div class="status-item">
+                        <div class="status-label">Database</div>
+                        <div class="status-value success">
+                            <i class="fas fa-check-circle"></i>
+                            Connected
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">Google Sheets</div>
+                        <div class="status-value success">
+                            <i class="fas fa-check-circle"></i>
+                            Connected
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">AIWaverider</div>
+                        <div class="status-value success">
+                            <i class="fas fa-check-circle"></i>
+                            Connected
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">GPU</div>
+                        <div class="status-value warning">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            Checking...
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Toast Notifications -->
+        <div class="toast-container" id="toastContainer">
+            <!-- Toast notifications will be added here -->
+        </div>
+
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+            <div class="loading-spinner">
+                <div class="spinner"></div>
+                <p id="loadingText">Processing...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -37,9 +37,91 @@ download_videos.bat
 
 ---
 
+## 🎤 Transcription Scripts
+
+### 3. `transcribe_only.py` - Transcribe Videos Only
+**Purpose:** Transcribes downloaded videos using GPU acceleration, generates smart names, and updates database/sheets WITHOUT downloads or uploads.
+
+```bash
+# Basic usage - transcribe all videos that need transcription
+python transcribe_only.py
+
+# Transcribe specific video IDs
+python transcribe_only.py --video-ids dQw4w9WgXcQ DOEATowCJuJ
+
+# Transcribe all pending videos
+python transcribe_only.py --all-pending
+
+# Limit to first 5 videos
+python transcribe_only.py --max-videos 5
+
+# Test mode
+python transcribe_only.py --test
+```
+
+**What it does:**
+- Finds downloaded videos in database
+- Transcribes using GPU acceleration (Whisper)
+- Generates smart names using GPT-4o-mini
+- Updates database with transcription data
+- Updates Google Sheets
+- **Skips downloads and uploads**
+
+### 4. `transcribe_videos.bat` - Windows Batch Wrapper
+**Purpose:** Windows-friendly interface for transcription operations.
+
+```bash
+transcribe_videos.bat
+```
+
+### 5. `transcribe_specific.py` - Advanced Transcription with Filtering
+**Purpose:** Advanced transcription script with filtering and selection options.
+
+```bash
+# List videos that would be transcribed (dry run)
+python transcribe_specific.py --list
+
+# Transcribe all pending videos
+python transcribe_specific.py --all-pending
+
+# Transcribe specific video IDs
+python transcribe_specific.py --video-ids dQw4w9WgXcQ DOEATowCJuJ
+
+# Filter by filename pattern
+python transcribe_specific.py --pattern rick
+
+# Filter by transcription status
+python transcribe_specific.py --status PENDING
+
+# Process most recent videos first
+python transcribe_specific.py --recent --max-videos 3
+
+# Combine filters
+python transcribe_specific.py --pattern astley --status PENDING --max-videos 2
+```
+
+**Advanced Features:**
+- **Status Filtering:** `--status PENDING|COMPLETED|FAILED`
+- **Pattern Matching:** `--pattern "rick"` (case-insensitive filename search)
+- **Recent First:** `--recent` (process most recently added videos first)
+- **Dry Run:** `--list` (show what would be processed without doing it)
+- **Video ID Selection:** `--video-ids` (specific video IDs)
+- **Limit Results:** `--max-videos` (limit number of videos processed)
+
+### 6. `transcribe_advanced.bat` - Windows Batch Wrapper
+**Purpose:** Windows-friendly interface for advanced transcription operations.
+
+```bash
+transcribe_advanced.bat --list
+transcribe_advanced.bat --all-pending --max-videos 5
+transcribe_advanced.bat --pattern rick --status PENDING
+```
+
+---
+
 ## 📤 Upload Scripts
 
-### 3. `upload_only.py` - Upload Videos Only
+### 7. `upload_only.py` - Upload Videos Only
 **Purpose:** Uploads videos from `assets/finished_videos/` to Google Drive and AIWaverider, updates sheets and database.
 
 ```bash
@@ -64,14 +146,14 @@ python upload_only.py --test
 - Updates database with upload status
 - **Skips download and transcription**
 
-### 4. `upload_videos.bat` - Windows Batch Wrapper
+### 8. `upload_videos.bat` - Windows Batch Wrapper
 **Purpose:** Windows-friendly interface for upload-only operations.
 
 ```bash
 upload_videos.bat
 ```
 
-### 5. `upload_specific.py` - Advanced Upload Options
+### 9. `upload_specific.py` - Advanced Upload Options
 **Purpose:** Upload videos with advanced filtering and selection options.
 
 ```bash
