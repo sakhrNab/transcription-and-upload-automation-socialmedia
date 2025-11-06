@@ -475,6 +475,48 @@ class VideoProcessor(BaseProcessor):
         self.log_step(f"Converting video to audio for video {index}")
         
         try:
+            # Ensure ffmpeg binary is available to the Python process. If not found on PATH,
+            # attempt to auto-discover common WinGet install locations or use FFMPEG_PATH env var.
+            import shutil
+            import glob
+
+            ffmpeg_exe = shutil.which('ffmpeg')
+            self.log_step(f"ffmpeg resolved to: {ffmpeg_exe}")
+
+            if not ffmpeg_exe:
+                # Check explicit env var first
+                ffmpeg_path_env = os.environ.get('FFMPEG_PATH')
+                if ffmpeg_path_env and os.path.exists(ffmpeg_path_env):
+                    ffmpeg_dir = os.path.dirname(ffmpeg_path_env)
+                    os.environ['PATH'] = ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
+                    self.log_step(f"Prepended FFMPEG_PATH to PATH: {ffmpeg_dir}")
+                else:
+                    # Try to auto-discover ffmpeg installed by WinGet (Gyan FFmpeg) under LOCALAPPDATA
+                    local_app = os.getenv('LOCALAPPDATA', '')
+                    packages_dir = os.path.join(local_app, 'Microsoft', 'WinGet', 'Packages')
+                    found = False
+                    if packages_dir and os.path.exists(packages_dir):
+                        matches = glob.glob(os.path.join(packages_dir, '**', 'bin', 'ffmpeg.exe'), recursive=True)
+                        if matches:
+                            ffmpeg_bin = matches[0]
+                            ffmpeg_dir = os.path.dirname(ffmpeg_bin)
+                            os.environ['PATH'] = ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
+                            self.log_step(f"Found ffmpeg via WinGet at: {ffmpeg_bin}")
+                            found = True
+
+                    if not found:
+                        # Last resort: try imageio-ffmpeg (if installed)
+                        try:
+                            import imageio_ffmpeg
+                            ffmpeg_exe_from_imageio = imageio_ffmpeg.get_ffmpeg_exe()
+                            if ffmpeg_exe_from_imageio and os.path.exists(ffmpeg_exe_from_imageio):
+                                ffmpeg_dir = os.path.dirname(ffmpeg_exe_from_imageio)
+                                os.environ['PATH'] = ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
+                                self.log_step(f"Using imageio-ffmpeg binary at: {ffmpeg_exe_from_imageio}")
+                                found = True
+                        except Exception:
+                            pass
+
             conversion_start = time.time()
             ffmpeg.input(video_file).output(
                 audio_file,
@@ -483,10 +525,10 @@ class VideoProcessor(BaseProcessor):
                 ar='16000', # 16kHz sample rate (optimal for Whisper)
                 loglevel='error'
             ).run(overwrite_output=True)
-            
+
             conversion_time = time.time() - conversion_start
             audio_size = os.path.getsize(audio_file)
-            
+
             self.log_step(f"Audio conversion completed: {os.path.basename(audio_file)} ({audio_size / (1024*1024):.2f} MB)")
             return audio_file
             

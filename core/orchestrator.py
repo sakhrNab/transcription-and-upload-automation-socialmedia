@@ -66,13 +66,23 @@ class SocialMediaOrchestrator:
             await queue_processor.start()
             logger.log_step("Queue processor started")
             
-            # Initialize all processors
+            # Initialize all processors. Failures in non-critical processors (like Sheets)
+            # should not stop the orchestrator - we log and continue.
             for processor in self.processing_pipeline:
-                await processor.initialize()
-                if hasattr(processor, 'drive_folder'):
-                    logger.log_step(f"Initialized {processor.__class__.__name__} with drive_folder: {processor.drive_folder}")
+                try:
+                    init_ok = await processor.initialize()
+                except Exception as e:
+                    init_ok = False
+                    logger.log_error(f"Exception initializing {processor.__class__.__name__}: {str(e)}")
+
+                if not init_ok:
+                    # Mark processor as unavailable but continue startup
+                    logger.log_error(f"{processor.__class__.__name__} failed to initialize - continuing without it")
                 else:
-                    logger.log_step(f"Initialized {processor.__class__.__name__}")
+                    if hasattr(processor, 'drive_folder'):
+                        logger.log_step(f"Initialized {processor.__class__.__name__} with drive_folder: {processor.drive_folder}")
+                    else:
+                        logger.log_step(f"Initialized {processor.__class__.__name__}")
             
             logger.log_step("All components initialized successfully")
             return True
@@ -124,19 +134,23 @@ class SocialMediaOrchestrator:
                 logger.log_error("AIWaverider upload failed")
                 return False
             
-            # Step 4: Sheets Update
-            logger.log_step("Step 4: Google Sheets update")
-            sheets_result = await self.sheets_processor.update_master_sheet()
-            if not sheets_result:
-                logger.log_error("Sheets update failed")
-                return False
+            # Step 4: Sheets Update (non-fatal)
+            logger.log_step("Step 4: Google Sheets update (non-fatal)")
+            try:
+                sheets_result = await self.sheets_processor.update_master_sheet()
+                if not sheets_result:
+                    logger.log_error("Sheets update failed - logged and continuing")
+            except Exception as e:
+                logger.log_error(f"Sheets update exception - logged and continuing: {str(e)}")
             
-            # Step 5: Excel Generation and Upload
-            logger.log_step("Step 5: Video transcripts sheet update")
-            transcripts_result = await self.transcripts_sheets_processor.update_transcripts_sheet()
-            if not transcripts_result:
-                logger.log_error("Transcripts sheet update failed")
-                return False
+            # Step 5: Excel Generation and Upload (non-fatal)
+            logger.log_step("Step 5: Video transcripts sheet update (non-fatal)")
+            try:
+                transcripts_result = await self.transcripts_sheets_processor.update_transcripts_sheet()
+                if not transcripts_result:
+                    logger.log_error("Transcripts sheet update failed - logged and continuing")
+            except Exception as e:
+                logger.log_error(f"Transcripts sheet update exception - logged and continuing: {str(e)}")
             
             logger.log_step("Pipeline processing completed successfully")
             return True

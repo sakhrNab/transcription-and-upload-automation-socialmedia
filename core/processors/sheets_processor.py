@@ -86,6 +86,37 @@ class SheetsProcessor(BaseProcessor):
         """Initialize sheets processor"""
         try:
             self.log_step("Initializing sheets processor")
+
+            # If credentials file is missing, empty, or invalid JSON, skip Sheets initialization
+            try:
+                if not self.credentials_file or not os.path.exists(self.credentials_file) or os.path.getsize(self.credentials_file) == 0:
+                    self.log_step("Google credentials file missing or empty - switching to offline Sheets mode and skipping initialization")
+                    self.offline_mode = True
+                    self._load_local_backup()
+                    return True
+
+                # Validate JSON quickly to avoid a noisy OAuth attempt
+                with open(self.credentials_file, 'r', encoding='utf-8') as cf:
+                    try:
+                        creds_json = json.load(cf)
+                    except Exception:
+                        self.log_step("Google credentials file is not valid JSON - switching to offline Sheets mode and skipping initialization")
+                        self.offline_mode = True
+                        self._load_local_backup()
+                        return True
+
+                    # If JSON is empty or not a dict, treat as invalid
+                    if not isinstance(creds_json, dict) or len(creds_json) == 0:
+                        self.log_step("Google credentials file appears invalid - switching to offline Sheets mode and skipping initialization")
+                        self.offline_mode = True
+                        self._load_local_backup()
+                        return True
+            except Exception as e:
+                # Any unexpected error while checking credentials should not block startup
+                self.log_error(f"Error checking Google credentials file - running in offline mode: {str(e)}")
+                self.offline_mode = True
+                self._load_local_backup()
+                return True
             
             # Check for required configuration
             if not self.master_sheet_id:

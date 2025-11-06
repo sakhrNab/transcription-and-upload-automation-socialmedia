@@ -85,7 +85,35 @@ class TranscriptsSheetsProcessor(BaseProcessor):
         """Initialize transcripts sheets processor"""
         try:
             self.log_step("Initializing transcripts sheets processor")
-            
+            # If credentials file is missing, empty, or invalid JSON, skip initialization and run in offline mode
+            try:
+                if not self.credentials_file or not os.path.exists(self.credentials_file) or os.path.getsize(self.credentials_file) == 0:
+                    self.log_step("Google credentials file missing or empty - switching to offline TranscriptsSheets mode and skipping initialization")
+                    self.offline_mode = True
+                    await self._save_local_backup([])  # ensure backup file exists
+                    return True
+
+                # Quick JSON validation to avoid noisy OAuth attempts
+                with open(self.credentials_file, 'r', encoding='utf-8') as cf:
+                    try:
+                        creds_json = json.load(cf)
+                    except Exception:
+                        self.log_step("Google credentials file is not valid JSON - switching to offline TranscriptsSheets mode and skipping initialization")
+                        self.offline_mode = True
+                        await self._save_local_backup([])
+                        return True
+
+                    if not isinstance(creds_json, dict) or len(creds_json) == 0:
+                        self.log_step("Google credentials file appears invalid - switching to offline TranscriptsSheets mode and skipping initialization")
+                        self.offline_mode = True
+                        await self._save_local_backup([])
+                        return True
+            except Exception as e:
+                self.log_error(f"Error checking Google credentials file - running in offline mode: {str(e)}")
+                self.offline_mode = True
+                await self._save_local_backup([])
+                return True
+
             # Initialize Google Sheets service
             self.service = await self._get_service()
             if not self.service:
