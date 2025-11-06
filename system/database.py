@@ -8,7 +8,9 @@ import aiosqlite
 import json
 import asyncio
 import threading
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 from .config import settings
@@ -712,4 +714,27 @@ class DatabaseManager:
                 self._initialized = False
 
 # Global database instance
-db_manager = DatabaseManager()
+# Use db/social_media.db if it exists, otherwise fall back to social_media.db
+# Try to find the database file relative to the project root
+# Try multiple possible locations for the database
+_db_path = None
+_possible_paths = [
+    "db/social_media.db",  # Project root/db/
+    Path(__file__).parent.parent / "db" / "social_media.db",  # Absolute path from this file
+    "social_media.db",  # Current directory fallback
+]
+
+for path in _possible_paths:
+    if isinstance(path, Path):
+        if path.exists():
+            _db_path = str(path)
+            break
+    elif os.path.exists(path):
+        _db_path = path
+        break
+
+# If none found, default to social_media.db in current directory
+if _db_path is None:
+    _db_path = "social_media.db"
+
+db_manager = DatabaseManager(db_path=_db_path)

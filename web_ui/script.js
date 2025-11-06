@@ -102,6 +102,9 @@ class SocialMediaProcessor {
         document.getElementById('toggleThumbnails').addEventListener('click', () => {
             this.toggleThumbnails();
         });
+        document.getElementById('uploadThumbnails').addEventListener('click', () => {
+            this.uploadThumbnails();
+        });
 
         // Data refresh events
         document.getElementById('refreshDownloadData').addEventListener('click', () => {
@@ -401,7 +404,7 @@ class SocialMediaProcessor {
                     </div>
                 </div>
                 <div class="video-actions">
-                    <span class="status-badge ${video.transcriptionStatus}">${video.transcriptionStatus}</span>
+                    <span class="status-badge ${video.transcriptionStatus ? video.transcriptionStatus.toLowerCase() : 'pending'}">${video.transcriptionStatus || 'PENDING'}</span>
                 </div>
             `;
 
@@ -501,12 +504,36 @@ class SocialMediaProcessor {
                 
                 this.updateTranscribeProgress(data);
                 
-                if (data.completed) {
+                if (data.status === 'completed' || data.status === 'failed') {
                     clearInterval(interval);
-                    this.showToast('Transcription completed', 'success');
+                    
+                    // Build success message
+                    let message = 'Transcription completed';
+                    if (data.skipped && data.skipped > 0) {
+                        message += ` (${data.skipped} video(s) skipped - already transcribed)`;
+                    }
+                    if (data.transcribed && data.transcribed > 0) {
+                        message += ` - ${data.transcribed} video(s) transcribed`;
+                    }
+                    
+                    // Check for sheets errors
+                    if (data.sheets_error) {
+                        this.showToast(
+                            `${message}, but Google Sheets update failed: ${data.sheets_error}. Data saved to database.`,
+                            'warning'
+                        );
+                    } else {
+                        this.showToast(message, 'success');
+                    }
+                    
+                    // Log skipped videos to console
+                    if (data.skipped && data.skipped > 0) {
+                        console.log(`⏭️ Skipped ${data.skipped} video(s) that were already transcribed`);
+                    }
+                    
                     this.updateDatabaseStatus('updated');
                     this.updateProcessStatus('transcribe', this.selectedVideos.size);
-                    this.loadFinishedVideos(); // Refresh finished videos
+                    this.loadVideos(); // Refresh videos list
                 }
             } catch (error) {
                 console.error('Progress tracking error:', error);
@@ -669,9 +696,19 @@ class SocialMediaProcessor {
                 
                 this.updateUploadProgress(data);
                 
-                if (data.completed) {
+                if (data.status === 'completed' || data.status === 'failed') {
                     clearInterval(interval);
-                    this.showToast('Upload completed', 'success');
+                    
+                    // Check for sheets errors
+                    if (data.sheets_error) {
+                        this.showToast(
+                            `Upload completed, but Google Sheets update failed: ${data.sheets_error}. Data saved to database.`,
+                            'warning'
+                        );
+                    } else {
+                        this.showToast('Upload completed', 'success');
+                    }
+                    
                     this.updateDatabaseStatus('updated');
                     this.updateProcessStatus('upload', this.selectedFinishedVideos.size);
                     this.updateStatusPanel();
@@ -748,7 +785,7 @@ class SocialMediaProcessor {
     }
 
     // Custom URL functionality
-    addCustomUrl() {
+    async addCustomUrl() {
         const input = document.getElementById('customUrlInput');
         const url = input.value.trim();
         
@@ -757,30 +794,52 @@ class SocialMediaProcessor {
             return;
         }
         
-        // Add to URL list
-        const urlList = document.getElementById('urlList');
-        const urlItem = document.createElement('div');
-        urlItem.className = 'url-item';
-        urlItem.innerHTML = `
-            <input type="checkbox" class="url-checkbox" value="${url}">
-            <div class="url-content">
-                <div class="url-text">${url}</div>
-                <div class="url-source">Custom URL</div>
-            </div>
-        `;
-        
-        urlList.appendChild(urlItem);
-        
-        // Clear input
-        input.value = '';
-        
-        // Add event listener for checkbox
-        const checkbox = urlItem.querySelector('.url-checkbox');
-        checkbox.addEventListener('change', (e) => {
-            this.toggleUrlSelection(e.target.value, e.target.checked);
-        });
-        
-        this.showToast('Custom URL added successfully!', 'success');
+        try {
+            // Save to backend
+            const response = await fetch('/api/urls', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    urls: [url]
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                // Add to URL list
+                const urlList = document.getElementById('urlList');
+                const urlItem = document.createElement('div');
+                urlItem.className = 'url-item';
+                urlItem.innerHTML = `
+                    <input type="checkbox" class="url-checkbox" value="${url}">
+                    <div class="url-content">
+                        <div class="url-text">${url}</div>
+                        <div class="url-source">Custom URL</div>
+                    </div>
+                `;
+                
+                urlList.appendChild(urlItem);
+                
+                // Clear input
+                input.value = '';
+                
+                // Add event listener for checkbox
+                const checkbox = urlItem.querySelector('.url-checkbox');
+                checkbox.addEventListener('change', (e) => {
+                    this.toggleUrlSelection(e.target.value, e.target.checked);
+                });
+                
+                this.showToast(`Custom URL added successfully! (${data.added} new, ${data.total} total)`, 'success');
+            } else {
+                this.showToast(data.error || 'Failed to save URL', 'error');
+            }
+        } catch (error) {
+            console.error('Error saving URL:', error);
+            this.showToast('Error saving URL to file', 'error');
+        }
     }
 
     // Thumbnails functionality
@@ -861,6 +920,52 @@ class SocialMediaProcessor {
         const countElement = document.querySelector('#thumbnailList').parentElement.querySelector('.selection-count');
         if (countElement) {
             countElement.textContent = `${this.selectedThumbnails.size} thumbnails selected`;
+        }
+    }
+
+    async uploadThumbnails() {
+        if (this.selectedThumbnails.size === 0) {
+            this.showToast('Please select at least one thumbnail', 'warning');
+            return;
+        }
+
+        this.isProcessing = true;
+        this.showLoadingOverlay('Uploading thumbnails...');
+
+        try {
+            const response = await fetch('/api/thumbnails/upload', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    thumbnailIds: Array.from(this.selectedThumbnails)
+                })
+            });
+
+            const data = await response.json();
+            
+            if (data.success) {
+                // Check for sheets errors
+                if (data.sheets_error) {
+                    this.showToast(
+                        `Thumbnails uploaded, but Google Sheets update failed: ${data.sheets_error}. Data saved to database.`,
+                        'warning'
+                    );
+                } else {
+                    this.showToast(`Successfully uploaded ${data.uploaded} thumbnail(s)`, 'success');
+                }
+                this.selectedThumbnails.clear();
+                this.loadThumbnails(); // Refresh thumbnails list
+            } else {
+                this.showToast(data.error || 'Thumbnail upload failed', 'error');
+            }
+        } catch (error) {
+            this.showToast('Error uploading thumbnails', 'error');
+            console.error('Thumbnail upload error:', error);
+        } finally {
+            this.hideLoadingOverlay();
+            this.isProcessing = false;
         }
     }
 
