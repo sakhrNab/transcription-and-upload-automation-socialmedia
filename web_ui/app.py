@@ -54,11 +54,11 @@ class WebAPI:
             raise
     
     async def get_urls_from_file(self):
-        """Load URLs from urls.txt file"""
+        """Load URLs from urls.txt file (in project root)"""
         try:
             # Get the project root directory (parent of web_ui)
             project_root = Path(__file__).parent.parent
-            urls_file = project_root / "data" / "urls.txt"
+            urls_file = project_root / "urls.txt"
             if not urls_file.exists():
                 return []
             
@@ -67,7 +67,60 @@ class WebAPI:
             
             return urls
         except Exception as e:
-            logger.error(f"Error loading URLs: {e}")
+            logger.error(f"Error loading URLs from file: {e}")
+            return []
+    
+    async def get_all_urls(self):
+        """Get URLs from both database and file, merged and deduplicated"""
+        try:
+            # Get URLs from database with full metadata
+            db_urls = await self.db_manager.get_all_urls()
+            db_url_set = {url_data.get('url', '') for url_data in db_urls if url_data.get('url')}
+            
+            # Get URLs from file
+            file_urls = await self.get_urls_from_file()
+            
+            # Start with DB URLs (they have full metadata)
+            all_urls = []
+            seen_urls = set()
+            
+            # Add DB URLs first - keep all metadata from database
+            for url_data in db_urls:
+                url = url_data.get('url', '')
+                if url and url not in seen_urls:
+                    # If video_name is missing but we have video_id, try to fetch it from database
+                    if not url_data.get('video_name') and url_data.get('video_id'):
+                        try:
+                            video_data = await self.db_manager.get_video_transcript_by_id(url_data.get('video_id'))
+                            if video_data and video_data.get('smart_name'):
+                                url_data['video_name'] = video_data.get('smart_name')
+                                url_data['video_filename'] = video_data.get('filename', '')
+                        except Exception as e:
+                            logger.debug(f"Could not fetch video name for video_id {url_data.get('video_id')}: {e}")
+                    
+                    # Keep all metadata from database query
+                    all_urls.append(url_data)
+                    seen_urls.add(url)
+            
+            # Add file URLs that aren't in DB (create minimal metadata structure)
+            for url in file_urls:
+                if url and url not in seen_urls:
+                    all_urls.append({
+                        'url': url,
+                        'source': 'file',
+                        'status': 'PENDING',
+                        'download_status': 'PENDING',
+                        'transcription_status': 'PENDING',
+                        'created_at': '',
+                        'from_db': False
+                    })
+                    seen_urls.add(url)
+            
+            return all_urls
+        except Exception as e:
+            logger.error(f"Error getting all URLs: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return []
     
     async def get_downloaded_videos(self):
@@ -346,24 +399,149 @@ class WebAPI:
             # Create a task ID
             task_id = f"download_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             
+            # Initialize task with items for each URL
+            active_tasks[task_id] = {
+                "status": "running",
+                "progress": 0,
+                "message": "Starting download...",
+                "items": [{"title": url, "status": "pending", "progress": 0} for url in urls],
+                "total": len(urls),
+                "completed": 0,
+                "failed": 0
+            }
+            
             # Start download in background thread
             def run_download():
                 try:
-                    asyncio.run(self.orchestrator.process_urls(urls))
-                    active_tasks[task_id] = {"status": "completed", "progress": 100}
+                    asyncio.run(self._download_videos_real(urls, task_id))
                 except Exception as e:
                     logger.error(f"Download process error: {e}")
-                    active_tasks[task_id] = {"status": "failed", "error": str(e)}
+                    active_tasks[task_id] = {
+                        "status": "failed",
+                        "error": str(e),
+                        "progress": 0,
+                        "message": f"Download failed: {str(e)}"
+                    }
             
             thread = threading.Thread(target=run_download)
             thread.start()
-            
-            active_tasks[task_id] = {"status": "running", "progress": 0}
             
             return {"success": True, "taskId": task_id}
         except Exception as e:
             logger.error(f"Error starting download process: {e}")
             return {"success": False, "error": str(e)}
+    
+    async def _download_videos_real(self, urls, task_id):
+        """Real download implementation with progress tracking"""
+        try:
+            total = len(urls)
+            completed = 0
+            failed = 0
+            
+            # Initialize video processor if needed
+            if not self.orchestrator.video_processor.initialized:
+                await self.orchestrator.video_processor.initialize()
+            
+            skipped = 0
+            for i, url in enumerate(urls, 1):
+                try:
+                    # Update status to checking/downloading
+                    active_tasks[task_id]["items"][i-1] = {
+                        "title": url,
+                        "status": "checking",
+                        "progress": 0
+                    }
+                    active_tasks[task_id]["message"] = f"Checking video {i} of {total}..."
+                    active_tasks[task_id]["progress"] = int(((i - 1) / total) * 100)
+                    
+                    # Download video (will raise AlreadyDownloadedException if already exists)
+                    try:
+                        # Update status to downloading
+                        active_tasks[task_id]["items"][i-1] = {
+                            "title": url,
+                            "status": "downloading",
+                            "progress": 0
+                        }
+                        active_tasks[task_id]["message"] = f"Downloading video {i} of {total}..."
+                        
+                        success = await self.orchestrator.video_processor.download_video_only(url, i)
+                        
+                        if success:
+                            completed += 1
+                            active_tasks[task_id]["items"][i-1] = {
+                                "title": url,
+                                "status": "completed",
+                                "progress": 100
+                            }
+                            active_tasks[task_id]["completed"] = completed
+                            active_tasks[task_id]["message"] = f"Downloaded {completed} of {total} videos..."
+                        else:
+                            failed += 1
+                            active_tasks[task_id]["items"][i-1] = {
+                                "title": url,
+                                "status": "failed",
+                                "progress": 0
+                            }
+                            active_tasks[task_id]["failed"] = failed
+                            active_tasks[task_id]["message"] = f"Failed to download video {i} of {total}..."
+                    
+                    except Exception as e:
+                        # Check if it's an AlreadyDownloadedException
+                        from core.processors.video_processor import AlreadyDownloadedException
+                        if isinstance(e, AlreadyDownloadedException):
+                            skipped += 1
+                            file_path = e.file_path or "Unknown location"
+                            active_tasks[task_id]["items"][i-1] = {
+                                "title": url,
+                                "status": "already_downloaded",
+                                "progress": 100,
+                                "message": f"Already downloaded: {os.path.basename(file_path) if file_path else 'Unknown file'}"
+                            }
+                            active_tasks[task_id]["skipped"] = skipped
+                            active_tasks[task_id]["message"] = f"Skipped {skipped} already downloaded video(s)..."
+                            logger.info(f"Video {i} already downloaded: {url} - {str(e)}")
+                        else:
+                            # Other exception - treat as failure
+                            raise
+                    
+                    # Update overall progress
+                    active_tasks[task_id]["progress"] = int((i / total) * 100)
+                    
+                except Exception as e:
+                    logger.error(f"Error downloading video {i}: {e}")
+                    failed += 1
+                    active_tasks[task_id]["items"][i-1] = {
+                        "title": url,
+                        "status": "failed",
+                        "progress": 0,
+                        "error": str(e)
+                    }
+                    active_tasks[task_id]["failed"] = failed
+            
+            # Final status
+            skipped_count = active_tasks[task_id].get("skipped", 0)
+            active_tasks[task_id]["status"] = "completed" if (completed > 0 or skipped_count > 0) else "failed"
+            active_tasks[task_id]["progress"] = 100
+            message_parts = []
+            if completed > 0:
+                message_parts.append(f"{completed} downloaded")
+            if skipped_count > 0:
+                message_parts.append(f"{skipped_count} already downloaded")
+            if failed > 0:
+                message_parts.append(f"{failed} failed")
+            active_tasks[task_id]["message"] = f"Download completed: {', '.join(message_parts)}"
+            active_tasks[task_id]["completed"] = completed
+            active_tasks[task_id]["failed"] = failed
+            active_tasks[task_id]["skipped"] = skipped_count
+            
+        except Exception as e:
+            logger.error(f"Error in download process: {e}")
+            active_tasks[task_id] = {
+                "status": "failed",
+                "error": str(e),
+                "progress": 0,
+                "message": f"Download failed: {str(e)}"
+            }
     
     async def start_transcribe_process(self, video_ids):
         """Start transcription process for selected videos from assets/downloads/videos/"""
@@ -522,6 +700,33 @@ class WebAPI:
                         video_data.get('thumbnail_file_path', ''),
                         video_data
                     )
+                    
+                    # Step 5.5: Update URLs table to ensure video_id is linked (for foreign key JOIN)
+                    # This ensures the transcription_status shows up in the URLs table via JOIN
+                    video_url = video_data.get('url', '') if video_data else ''
+                    if video_url:
+                        try:
+                            # Ensure URL entry has video_id and transcription_status set
+                            await self.db_manager.update_url_status(
+                                url=video_url,
+                                video_id=db_video_id,
+                                transcription_status='COMPLETED',
+                                notes=f'Video transcribed - transcription status updated'
+                            )
+                            logger.info(f"Updated URLs table with video_id {db_video_id} for transcribed video URL: {video_url}")
+                        except Exception as e:
+                            logger.error(f"Error updating URLs table after transcription: {e}")
+                    else:
+                        # Try to find URL by video_id and ensure it's linked
+                        try:
+                            async with self.db_manager.get_connection() as conn:
+                                cursor = await conn.execute("SELECT url FROM urls WHERE video_id = ?", (db_video_id,))
+                                row = await cursor.fetchone()
+                                if row:
+                                    url_from_db = row[0]
+                                    logger.info(f"Found URL entry with video_id {db_video_id}, transcription status will be visible via JOIN")
+                        except Exception as e:
+                            logger.error(f"Error checking URLs table by video_id: {e}")
                     
                     # Step 6: Clean up audio file
                     try:
@@ -751,9 +956,22 @@ class WebAPI:
         try:
             task = active_tasks.get(task_id, {"status": "not_found"})
             
-            if task["status"] == "running":
-                # Simulate progress updates
-                task["progress"] = min(task.get("progress", 0) + 10, 90)
+            if task.get("status") == "not_found":
+                return {"status": "not_found", "error": "Task not found"}
+            
+            # Ensure all required fields are present
+            if "items" not in task:
+                task["items"] = []
+            if "progress" not in task:
+                task["progress"] = 0
+            if "message" not in task:
+                task["message"] = "Processing..."
+            if "completed" not in task:
+                task["completed"] = sum(1 for item in task.get("items", []) if item.get("status") == "completed")
+            if "failed" not in task:
+                task["failed"] = sum(1 for item in task.get("items", []) if item.get("status") == "failed")
+            if "total" not in task:
+                task["total"] = len(task.get("items", []))
             
             return task
         except Exception as e:
@@ -910,30 +1128,71 @@ class WebAPI:
             return {"success": False, "error": str(e)}
     
     async def save_urls_to_file(self, urls):
-        """Save URLs to urls.txt file"""
+        """Save URLs to both database and urls.txt file (in project root). Creates the file if it doesn't exist."""
         try:
             # Get the project root directory (parent of web_ui)
             project_root = Path(__file__).parent.parent
-            urls_file = project_root / "data" / "urls.txt"
-            urls_file.parent.mkdir(parents=True, exist_ok=True)
+            urls_file = project_root / "urls.txt"  # Changed from data/urls.txt to root
             
-            # Read existing URLs to avoid duplicates
-            existing_urls = set()
-            if urls_file.exists():
-                with open(urls_file, 'r', encoding='utf-8') as f:
-                    existing_urls = {line.strip() for line in f if line.strip() and not line.startswith('#')}
+            # Check if file exists before we create it
+            file_existed = urls_file.exists()
             
-            # Append new URLs
-            new_urls_count = 0
+            # Read existing URLs from file to avoid duplicates
+            existing_file_urls = set()
+            if file_existed:
+                try:
+                    with open(urls_file, 'r', encoding='utf-8') as f:
+                        existing_file_urls = {line.strip() for line in f if line.strip() and not line.startswith('#')}
+                except Exception as e:
+                    logger.warning(f"Error reading existing URLs file, will create new one: {e}")
+                    existing_file_urls = set()
+            
+            # Save to database first
+            db_added_count = 0
+            for url in urls:
+                url = url.strip()
+                if url:
+                    # Check if URL already exists in DB
+                    try:
+                        exists = await self.db_manager.url_exists(url)
+                        if not exists:
+                            success = await self.db_manager.add_url(url, source='manual', status='PENDING', download_status='PENDING')
+                            if success:
+                                db_added_count += 1
+                                logger.info(f"Added URL to database: {url}")
+                            else:
+                                logger.warning(f"Failed to add URL to database: {url}")
+                        else:
+                            logger.info(f"URL already exists in database: {url}")
+                    except Exception as db_error:
+                        logger.error(f"Error adding URL to database: {db_error}")
+                        # Continue to save to file even if DB save fails
+            
+            # Append new URLs to file (file will be created automatically if it doesn't exist)
+            file_added_count = 0
             with open(urls_file, 'a', encoding='utf-8') as f:
                 for url in urls:
                     url = url.strip()
-                    if url and url not in existing_urls:
+                    if url and url not in existing_file_urls:
                         f.write(f"{url}\n")
-                        existing_urls.add(url)
-                        new_urls_count += 1
+                        existing_file_urls.add(url)
+                        file_added_count += 1
             
-            return {"success": True, "added": new_urls_count, "total": len(existing_urls)}
+            # Log if file was created
+            if not file_existed and file_added_count > 0:
+                logger.info(f"Created new URLs file: {urls_file}")
+            
+            # Get total count from both sources
+            all_urls = await self.get_all_urls()
+            total_count = len(all_urls)
+            
+            return {
+                "success": True, 
+                "added": max(db_added_count, file_added_count),  # Return the count of actually new URLs
+                "total": total_count,
+                "db_added": db_added_count,
+                "file_added": file_added_count
+            }
         except Exception as e:
             logger.error(f"Error saving URLs: {e}")
             return {"success": False, "error": str(e)}
@@ -984,12 +1243,23 @@ def static_files(filename):
 
 @app.route('/api/urls', methods=['GET'])
 def get_urls():
-    """Get URLs from urls.txt file"""
+    """Get URLs from both database and urls.txt file"""
     try:
-        urls = asyncio.run(api.get_urls_from_file())
-        return jsonify({"success": True, "urls": urls})
+        result = asyncio.run(api.get_all_urls())
+        # Return just the URL strings for backward compatibility with frontend
+        urls = [item.get('url', '') if isinstance(item, dict) else item for item in result]
+        
+        # Log for debugging
+        logger.info(f"Returning {len(result)} URLs with metadata")
+        if result and len(result) > 0:
+            sample = result[0]
+            logger.debug(f"Sample URL data: {list(sample.keys()) if isinstance(sample, dict) else 'not a dict'}")
+        
+        return jsonify({"success": True, "urls": urls, "urls_with_metadata": result})
     except Exception as e:
         logger.error(f"Error getting URLs: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({"success": False, "error": str(e)})
 
 @app.route('/api/urls', methods=['POST'])

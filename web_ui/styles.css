@@ -151,6 +151,53 @@ body {
     border: 1px solid var(--gray-200);
 }
 
+.progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--space-3);
+}
+
+.progress-text {
+    font-weight: 500;
+    color: var(--gray-900);
+    font-size: var(--font-size-base);
+}
+
+.progress-percent {
+    font-weight: 600;
+    color: var(--primary-color);
+    font-size: var(--font-size-lg);
+}
+
+.progress-bar-container {
+    width: 100%;
+    height: 24px;
+    background: var(--gray-200);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    position: relative;
+}
+
+.progress-bar-container .progress-bar-fill {
+    height: 100%;
+    background: var(--primary-color);
+    transition: width 0.3s ease, background-color 0.3s ease;
+    border-radius: var(--radius-full);
+}
+
+.progress-stats {
+    display: flex;
+    gap: var(--space-4);
+    font-size: var(--font-size-sm);
+    color: var(--gray-600);
+    margin-top: var(--space-2);
+}
+
+.progress-stats strong {
+    color: var(--gray-900);
+}
+
 .progress-bar {
     width: 100%;
     height: 8px;
@@ -467,7 +514,7 @@ body {
     transition: all var(--transition-fast);
 }
 
-.url-item:hover {
+.url-item:hover:not(.downloaded) {
     border-color: var(--primary-color);
     box-shadow: var(--shadow-sm);
 }
@@ -475,6 +522,17 @@ body {
 .url-item.selected {
     border-color: var(--primary-color);
     background: var(--primary-light);
+}
+
+.url-item.downloaded {
+    background: var(--gray-100);
+    opacity: 0.6;
+    border-color: var(--gray-300);
+}
+
+.url-item.downloaded:hover {
+    border-color: var(--gray-300);
+    box-shadow: none;
 }
 
 .url-checkbox {
@@ -489,6 +547,36 @@ body {
     font-size: var(--font-size-sm);
     color: var(--gray-700);
     word-break: break-all;
+}
+
+.url-text.strikethrough {
+    text-decoration: line-through;
+    color: var(--gray-500);
+}
+
+/* Pagination */
+.pagination-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: var(--space-4);
+    margin-top: var(--space-4);
+    padding: var(--space-3);
+}
+
+.pagination-btn {
+    min-width: 100px;
+}
+
+.pagination-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.pagination-info {
+    font-size: var(--font-size-sm);
+    color: var(--gray-600);
+    font-weight: 500;
 }
 
 .url-status {
@@ -509,6 +597,11 @@ body {
 .status-badge.pending {
     background: var(--gray-200);
     color: var(--gray-600);
+}
+
+.status-badge.downloaded {
+    background: var(--gray-300);
+    color: var(--gray-700);
 }
 
 .status-badge.downloading {

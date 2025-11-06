@@ -88,6 +88,22 @@ CREATE TABLE IF NOT EXISTS processing_queue (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- URLs Table - Tracks URLs for download
+CREATE TABLE IF NOT EXISTS urls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT UNIQUE NOT NULL,
+    source TEXT DEFAULT 'manual', -- 'manual', 'file', 'import'
+    status TEXT DEFAULT 'PENDING', -- 'PENDING', 'DOWNLOADED', 'FAILED'
+    download_status TEXT DEFAULT 'PENDING', -- 'PENDING', 'DOWNLOADED', 'FAILED'
+    video_id TEXT, -- Foreign key to video_transcripts.video_id
+    downloaded_at TIMESTAMP, -- Date when video was downloaded
+    transcription_status TEXT DEFAULT 'PENDING', -- 'PENDING', 'COMPLETED', 'FAILED'
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (video_id) REFERENCES video_transcripts(video_id)
+);
+
 -- Indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_video_transcripts_video_id ON video_transcripts(video_id);
 CREATE INDEX IF NOT EXISTS idx_video_transcripts_filename ON video_transcripts(filename);
@@ -99,3 +115,6 @@ CREATE INDEX IF NOT EXISTS idx_upload_tracking_filename ON upload_tracking(filen
 CREATE INDEX IF NOT EXISTS idx_upload_tracking_file_type ON upload_tracking(file_type);
 CREATE INDEX IF NOT EXISTS idx_upload_tracking_gdrive_status ON upload_tracking(gdrive_upload_status);
 CREATE INDEX IF NOT EXISTS idx_upload_tracking_aiwaverider_status ON upload_tracking(aiwaverider_upload_status);
+
+CREATE INDEX IF NOT EXISTS idx_urls_url ON urls(url);
+CREATE INDEX IF NOT EXISTS idx_urls_status ON urls(status);

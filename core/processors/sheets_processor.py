@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import pandas as pd
+from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -225,6 +226,55 @@ class SheetsProcessor(BaseProcessor):
         except Exception as e:
             self.log_error(f"Error saving local backup: {str(e)}")
     
+    async def _save_sheet_locally(self, content_list: List[Dict]) -> None:
+        """Save sheet data locally as CSV and Excel in assets/downloads/transcripts before uploading"""
+        try:
+            from pathlib import Path
+            
+            # Create local directory in project-root/assets/downloads/transcripts
+            project_root = Path(__file__).parent.parent.parent
+            local_dir = project_root / "assets" / "downloads" / "transcripts"
+            local_dir.mkdir(parents=True, exist_ok=True)
+            
+            if not content_list:
+                self.log_step("No data to save locally")
+                return
+            
+            # Convert to DataFrame for easy CSV/Excel export
+            import pandas as pd
+            
+            # Prepare data for DataFrame
+            df_data = []
+            for content_info in content_list:
+                row = {}
+                for col in self.SHEET_COLUMNS:
+                    row[col] = content_info.get(col, '')
+                df_data.append(row)
+            
+            df = pd.DataFrame(df_data)
+            
+            # Save as CSV
+            csv_file = local_dir / f"{self.master_sheet_name}.csv"
+            df.to_csv(csv_file, index=False, encoding='utf-8')
+            self.log_step(f"Master sheet saved locally as CSV: {csv_file}")
+            
+            # Save as Excel
+            try:
+                excel_file = local_dir / f"{self.master_sheet_name}.xlsx"
+                df.to_excel(excel_file, index=False, engine='openpyxl')
+                self.log_step(f"Master sheet saved locally as Excel: {excel_file}")
+            except Exception as e:
+                self.log_error(f"Could not save Excel file (openpyxl may not be installed): {str(e)}")
+            
+            # Also save as JSON for backup
+            json_file = local_dir / f"{self.master_sheet_name}.json"
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(content_list, f, indent=2, ensure_ascii=False)
+            self.log_step(f"Master sheet saved locally as JSON: {json_file}")
+            
+        except Exception as e:
+            self.log_error(f"Error saving sheet locally: {str(e)}")
+    
     async def process(self, urls: List[str] = None) -> bool:
         """Main processing method - alias for update_master_sheet"""
         return await self.update_master_sheet()
@@ -249,6 +299,9 @@ class SheetsProcessor(BaseProcessor):
             if not content_list:
                 self.log_step("No data to update in master sheet")
                 return True
+            
+            # Save sheet locally first (before uploading to Google Sheets)
+            await self._save_sheet_locally(content_list)
             
             # Update the sheet
             success = await self._update_sheet_with_data(content_list)
@@ -583,21 +636,22 @@ class SheetsProcessor(BaseProcessor):
     async def _save_tracking_data_locally(self, content_list: List[Dict]) -> None:
         """Save tracking data locally as backup"""
         try:
-            # Create directory if it doesn't exist
-            local_dir = 'assets/downloads/socialmedia/tracking'
+            # Create directory under project-root/assets/downloads/socialmedia/tracking
+            project_root = Path(__file__).parent.parent.parent
+            local_dir = project_root / 'assets' / 'downloads' / 'socialmedia' / 'tracking'
             os.makedirs(local_dir, exist_ok=True)
-            
+
             # Save as JSON
-            json_file = os.path.join(local_dir, 'tracking_data.json')
+            json_file = os.path.join(str(local_dir), 'tracking_data.json')
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(content_list, f, indent=2, ensure_ascii=False)
-            
+
             # Save as CSV
-            csv_file = os.path.join(local_dir, 'tracking_data.csv')
+            csv_file = os.path.join(str(local_dir), 'tracking_data.csv')
             if content_list:
                 df = pd.DataFrame(content_list)
                 df.to_csv(csv_file, index=False, encoding='utf-8')
-            
+
             self.log_step(f"Tracking data saved locally to {local_dir}")
             
         except Exception as e:
@@ -651,8 +705,11 @@ class SheetsProcessor(BaseProcessor):
     async def _find_thumbnail_file(self, thumbnail_name: str) -> Optional[str]:
         """Find thumbnail file in the thumbnails directory"""
         try:
-            thumbnails_dir = "assets/downloads/thumbnails"
-            for root, dirs, files in os.walk(thumbnails_dir):
+            project_root = Path(__file__).parent.parent.parent
+            thumbnails_dir = project_root / 'assets' / 'downloads' / 'thumbnails'
+            if not thumbnails_dir.exists():
+                return None
+            for root, dirs, files in os.walk(str(thumbnails_dir)):
                 if thumbnail_name in files:
                     return os.path.join(root, thumbnail_name)
             return None

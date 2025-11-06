@@ -9,6 +9,7 @@ import asyncio
 import os
 import sys
 import json
+from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -195,8 +196,9 @@ class TranscriptsSheetsProcessor(BaseProcessor):
             import json
             import pandas as pd
             
-            # Create local directory following the same pattern as tracking_data
-            local_dir = os.path.join("assets", "downloads", "socialmedia", "transcripts")
+            # Create local directory in project-root/assets/downloads/transcripts
+            project_root = Path(__file__).parent.parent.parent
+            local_dir = project_root / "assets" / "downloads" / "transcripts"
             os.makedirs(local_dir, exist_ok=True)
             
             # Convert to list of dictionaries for JSON
@@ -211,14 +213,23 @@ class TranscriptsSheetsProcessor(BaseProcessor):
                         data_dicts.append(dict(zip(headers, row)))
                 
                 # Save as JSON
-                json_file = os.path.join(local_dir, 'video_transcripts.json')
+                json_file = os.path.join(str(local_dir), 'video_transcripts.json')
                 with open(json_file, 'w', encoding='utf-8') as f:
                     json.dump(data_dicts, f, indent=2, ensure_ascii=False)
                 
                 # Save as CSV
-                csv_file = os.path.join(local_dir, 'video_transcripts.csv')
+                csv_file = os.path.join(str(local_dir), 'video_transcripts.csv')
                 df = pd.DataFrame(data_dicts)
                 df.to_csv(csv_file, index=False, encoding='utf-8')
+                self.log_step(f"Transcript data saved locally as CSV: {csv_file}")
+                
+                # Save as Excel
+                try:
+                    excel_file = os.path.join(str(local_dir), 'video_transcripts.xlsx')
+                    df.to_excel(excel_file, index=False, engine='openpyxl')
+                    self.log_step(f"Transcript data saved locally as Excel: {excel_file}")
+                except Exception as e:
+                    self.log_error(f"Could not save Excel file (openpyxl may not be installed): {str(e)}")
                 
                 self.log_step(f"Transcript data saved locally to {local_dir}")
             
@@ -282,8 +293,9 @@ class TranscriptsSheetsProcessor(BaseProcessor):
                     'Video File Size (MB)': round(video_size_mb, 2),
                     'Video Path': video.get('file_path', ''),
                     'Thumbnail Path': thumbnail.get('file_path', ''),
-                    'Transcript Path': f"assets/downloads/transcripts/{video.get('video_id', '')}_transcript.txt",
-                    'Audio Path': f"assets/downloads/audio/{os.path.splitext(video_filename)[0]}.wav",
+                    # Use project-root based canonical paths for transcript/audio
+                    'Transcript Path': str(Path(__file__).parent.parent.parent / "assets" / "downloads" / "transcripts" / f"{video.get('video_id', '')}_transcript.txt"),
+                        'Audio Path': str(Path(__file__).parent.parent.parent / "assets" / "downloads" / "audio" / f"{os.path.splitext(video_filename)[0]}.wav"),
                     'Transcript': transcript_text,
                     'Transcript Word Count': word_count,
                     'Source URL': video.get('url', ''),

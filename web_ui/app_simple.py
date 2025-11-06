@@ -100,7 +100,8 @@ class MockAPI:
     async def get_urls_from_file(self):
         """Load URLs from actual urls.txt file"""
         try:
-            urls_file = Path("../urls.txt")
+            project_root = Path(__file__).parent.parent
+            urls_file = project_root / "urls.txt"
             if not urls_file.exists():
                 return mock_data['urls']
             
@@ -115,12 +116,14 @@ class MockAPI:
     async def get_downloaded_videos(self):
         """Get videos from assets/downloads/videos/ for transcription"""
         try:
-            videos_dir = Path("../assets/downloads/videos")
+            # Resolve canonical project assets directory (parent of web_ui)
+            project_root = Path(__file__).parent.parent
+            videos_dir = project_root / "assets" / "downloads" / "videos"
             if not videos_dir.exists():
                 return mock_data['videos']
             
             # Get all available thumbnails for matching
-            thumbnails_dir = Path("../assets/downloads/thumbnails")
+            thumbnails_dir = project_root / "assets" / "downloads" / "thumbnails"
             available_thumbnails = set()
             if thumbnails_dir.exists():
                 for thumb_file in thumbnails_dir.rglob("*.webp"):
@@ -159,12 +162,13 @@ class MockAPI:
     async def get_finished_videos(self):
         """Get finished videos from assets/finished_videos/ for upload"""
         try:
-            videos_dir = Path("../assets/finished_videos")
+            project_root = Path(__file__).parent.parent
+            videos_dir = project_root / "assets" / "finished_videos"
             if not videos_dir.exists():
                 return mock_data['finished_videos']
             
             # Get all available thumbnails for matching
-            thumbnails_dir = Path("../assets/downloads/thumbnails")
+            thumbnails_dir = project_root / "assets" / "downloads" / "thumbnails"
             available_thumbnails = set()
             if thumbnails_dir.exists():
                 for thumb_file in thumbnails_dir.rglob("*.webp"):
@@ -189,7 +193,7 @@ class MockAPI:
                         'uploadStatus': 'PENDING',
                         'thumbnail': f'/thumbnails/{video_file.stem}.webp' if thumbnail_exists else '/placeholder-thumbnail.jpg',
                         'path': str(video_file),
-                        'thumbnailPath': f"../assets/downloads/thumbnails/{video_file.stem}.webp" if thumbnail_exists else None
+                        'thumbnailPath': f"/thumbnails/{video_file.stem}.webp" if thumbnail_exists else None
                     })
                 except Exception as e:
                     logger.error(f"Error processing video file {video_file}: {e}")
@@ -343,10 +347,11 @@ def get_finished_videos():
 def get_thumbnails():
     """Get thumbnails for upload"""
     try:
-        thumbnails_dir = Path("../assets/downloads/thumbnails")
+        project_root = Path(__file__).parent.parent
+        thumbnails_dir = project_root / "assets" / "downloads" / "thumbnails"
         if not thumbnails_dir.exists():
             return jsonify({"success": True, "thumbnails": []})
-        
+
         thumbnails = []
         for thumbnail_file in thumbnails_dir.rglob("*.webp"):
             try:
@@ -434,9 +439,10 @@ def get_status():
 def get_thumbnail(filename):
     """Serve thumbnail images"""
     try:
-        thumbnails_dir = Path("../assets/downloads/thumbnails")
+        project_root = Path(__file__).parent.parent
+        thumbnails_dir = project_root / "assets" / "downloads" / "thumbnails"
         thumbnail_path = thumbnails_dir / filename
-        
+
         if thumbnail_path.exists():
             return send_from_directory(str(thumbnails_dir), filename)
         else:

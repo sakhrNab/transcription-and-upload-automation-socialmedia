@@ -44,11 +44,14 @@ class VideoProcessor(BaseProcessor):
         self.processed_count = 0
         self.failed_count = 0
         
-        # Configuration
-        self.video_output_dir = "assets/downloads/videos"
-        self.audio_output_dir = "assets/downloads/audio"
-        self.thumbnails_dir = "assets/downloads/thumbnails"
-        self.transcripts_dir = "assets/downloads/transcripts"
+        # Get project root directory (parent of core/processors/)
+        project_root = Path(__file__).parent.parent.parent
+        
+        # Configuration - use absolute paths based on project root
+        self.video_output_dir = str(project_root / "assets" / "downloads" / "videos")
+        self.audio_output_dir = str(project_root / "assets" / "downloads" / "audio")
+        self.thumbnails_dir = str(project_root / "assets" / "downloads" / "thumbnails")
+        self.transcripts_dir = str(project_root / "assets" / "downloads" / "transcripts")
         
         # Processing configuration from settings
         self.whisper_model = settings.whisper_model
@@ -303,9 +306,19 @@ class VideoProcessor(BaseProcessor):
                 transcript_path = await self._save_transcript_file(transcript, generated_name, metadata, index)
                 
                 # Step 7: Update database with transcription
+                # Ensure all paths are absolute before saving to database
+                abs_video_path = os.path.abspath(video_path) if video_path else ''
+                abs_audio_path = os.path.abspath(audio_path) if audio_path else ''
+                abs_transcript_path = os.path.abspath(transcript_path) if transcript_path else ''
+                abs_thumbnail_path = os.path.abspath(thumbnail_path) if thumbnail_path else ''
+                
                 video_id = metadata.get('video_id', '')
                 if video_id:
-                    await self._update_video_transcription(video_id, transcript, generated_name, video_path, thumbnail_path, metadata)
+                    await self._update_video_transcription(
+                        video_id, transcript, generated_name, 
+                        abs_video_path, abs_thumbnail_path, metadata,
+                        abs_audio_path, abs_transcript_path
+                    )
                 
                 self.log_step(f"Complete pipeline successful: {generated_name}")
                 return True
@@ -342,21 +355,29 @@ class VideoProcessor(BaseProcessor):
         title = info.get('title', video_id)
         description = info.get('description', '')
         
-        # Check if already downloaded
-        for file in os.listdir(self.video_output_dir):
-            if video_id in file and file.endswith(('.mp4', '.webm', '.mkv')):
-                full_path = os.path.join(self.video_output_dir, file)
-                self.log_step(f"Video already downloaded: {file}")
-                metadata = self._extract_comprehensive_metadata(info, full_path)
-                return full_path, metadata, info
+        # Check if already downloaded - use absolute path
+        abs_video_output_dir = os.path.abspath(self.video_output_dir)
+        if os.path.exists(abs_video_output_dir):
+            for file in os.listdir(abs_video_output_dir):
+                if video_id in file and file.endswith(('.mp4', '.webm', '.mkv')):
+                    full_path = os.path.join(abs_video_output_dir, file)
+                    self.log_step(f"Video already downloaded: {file}")
+                    metadata = self._extract_comprehensive_metadata(info, full_path)
+                    return full_path, metadata, info
         
         # Create filename with sequential numbering
-        seq_num = self._get_video_number(self.video_output_dir, username)
-        filename_template = os.path.join(self.video_output_dir, f"{seq_num:02d}_{username}_{video_id}.%(ext)s")
+        # Ensure video_output_dir is absolute and exists
+        abs_video_output_dir = os.path.abspath(self.video_output_dir)
+        os.makedirs(abs_video_output_dir, exist_ok=True)
+        
+        seq_num = self._get_video_number(abs_video_output_dir, username)
+        # Use absolute path for filename template to avoid working directory issues
+        filename_template = os.path.join(abs_video_output_dir, f"{seq_num:02d}_{username}_{video_id}.%(ext)s")
         
         self.log_step(f"Starting download: {title}")
+        self.log_step(f"Download directory: {abs_video_output_dir}")
         
-        # Download configuration
+        # Download configuration - use absolute path
         ydl_opts = {
             'outtmpl': filename_template,
             'format': 'best[ext=mp4]/best',
@@ -369,24 +390,42 @@ class VideoProcessor(BaseProcessor):
         download_start = time.time()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
+            # prepare_filename might return relative path, convert to absolute
             downloaded_file = ydl.prepare_filename(info)
+            # Ensure it's an absolute path
+            if not os.path.isabs(downloaded_file):
+                downloaded_file = os.path.join(abs_video_output_dir, os.path.basename(downloaded_file))
         
         download_time = time.time() - download_start
         
+        # If file not found, try to find it in the correct directory
         if not os.path.exists(downloaded_file):
-            # Try to find the downloaded file with different extension
-            base_name = os.path.splitext(downloaded_file)[0]
-            for ext in ['.mp4', '.webm', '.mkv', '.mov']:
-                alt_path = base_name + ext
-                if os.path.exists(alt_path):
-                    downloaded_file = alt_path
-                    break
+            # Try with the actual extension from info
+            ext = info.get('ext', 'mp4')
+            template_file = os.path.join(abs_video_output_dir, f"{seq_num:02d}_{username}_{video_id}.{ext}")
+            if os.path.exists(template_file):
+                downloaded_file = template_file
             else:
-                self.log_error("Downloaded file not found")
-                raise Exception("Downloaded file not found")
+                # Try to find the downloaded file with different extension in the correct directory
+                base_name = os.path.join(abs_video_output_dir, f"{seq_num:02d}_{username}_{video_id}")
+                for ext in ['.mp4', '.webm', '.mkv', '.mov']:
+                    alt_path = base_name + ext
+                    if os.path.exists(alt_path):
+                        downloaded_file = alt_path
+                        break
+                else:
+                    self.log_error(f"Downloaded file not found. Expected in: {abs_video_output_dir}")
+                    self.log_error(f"Tried filename: {downloaded_file}")
+                    # List files in directory for debugging
+                    if os.path.exists(abs_video_output_dir):
+                        files = os.listdir(abs_video_output_dir)
+                        self.log_error(f"Files in directory: {files[:10]}")  # Show first 10
+                    raise Exception(f"Downloaded file not found in {abs_video_output_dir}")
         
         file_size = os.path.getsize(downloaded_file)
+        abs_path = os.path.abspath(downloaded_file)
         self.log_step(f"Downloaded successfully: {os.path.basename(downloaded_file)} ({file_size / (1024*1024):.2f} MB)")
+        self.log_step(f"Full file path: {abs_path}")
         
         metadata = self._extract_comprehensive_metadata(info, downloaded_file)
         return downloaded_file, metadata, info
@@ -448,7 +487,10 @@ class VideoProcessor(BaseProcessor):
                     ext = '.jpg'
                 
                 filename = f"{seq_num:02d}_{username}_{video_id}{ext}"
-                filepath = os.path.join(self.thumbnails_dir, filename)
+                # Ensure thumbnails_dir is absolute
+                abs_thumbnails_dir = os.path.abspath(self.thumbnails_dir)
+                os.makedirs(abs_thumbnails_dir, exist_ok=True)
+                filepath = os.path.join(abs_thumbnails_dir, filename)
                 filepath = self._get_unique_filename(filepath)
                 # Normalize path separators for consistency
                 filepath = os.path.normpath(filepath)
@@ -468,8 +510,11 @@ class VideoProcessor(BaseProcessor):
     
     async def _convert_video_to_audio(self, video_file: str, index: int) -> str:
         """Convert video to high-quality audio for transcription"""
+        # Ensure audio_output_dir is absolute
+        abs_audio_output_dir = os.path.abspath(self.audio_output_dir)
+        os.makedirs(abs_audio_output_dir, exist_ok=True)
         video_basename = os.path.splitext(os.path.basename(video_file))[0]
-        audio_file = os.path.join(self.audio_output_dir, f"{video_basename}.wav")
+        audio_file = os.path.join(abs_audio_output_dir, f"{video_basename}.wav")
         audio_file = self._get_unique_filename(audio_file)
         
         self.log_step(f"Converting video to audio for video {index}")
@@ -605,13 +650,17 @@ class VideoProcessor(BaseProcessor):
         
         try:
             # Use ffmpeg to split audio into chunks
+            # Ensure audio_output_dir is absolute
+            abs_audio_output_dir = os.path.abspath(self.audio_output_dir)
+            os.makedirs(abs_audio_output_dir, exist_ok=True)
+            
             chunks = []
             duration = self._get_audio_duration(audio_file)
             num_chunks = int(duration // self.chunk_duration) + 1
             
             for i in range(num_chunks):
                 start_time = i * self.chunk_duration
-                chunk_file = os.path.join(self.audio_output_dir, f"chunk_{i}_{os.path.basename(audio_file)}")
+                chunk_file = os.path.join(abs_audio_output_dir, f"chunk_{i}_{os.path.basename(audio_file)}")
                 
                 ffmpeg.input(audio_file, ss=start_time, t=self.chunk_duration).output(
                     chunk_file,
@@ -693,8 +742,11 @@ Return only the name, no explanation. Make it suitable for a filename."""
     
     async def _save_transcript_file(self, transcript: str, generated_name: str, metadata: dict, index: int) -> str:
         """Save transcript as separate text file with metadata header"""
+        # Ensure transcripts_dir is absolute
+        abs_transcripts_dir = os.path.abspath(self.transcripts_dir)
+        os.makedirs(abs_transcripts_dir, exist_ok=True)
         transcript_filename = f"{generated_name}.txt"
-        transcript_path = os.path.join(self.transcripts_dir, transcript_filename)
+        transcript_path = os.path.join(abs_transcripts_dir, transcript_filename)
         transcript_path = self._get_unique_filename(transcript_path)
         
         # Create transcript file with metadata header
@@ -747,12 +799,14 @@ TRANSCRIPT:
         return safe[:max_length] if len(safe) > max_length else safe
     
     def _get_video_number(self, output_dir: str, username: str) -> int:
-        """Get next available number for a username"""
+        """Get next available number for a username - uses absolute path"""
+        # Ensure we're using absolute path
+        abs_output_dir = os.path.abspath(output_dir)
         pattern = re.compile(rf'\d+_{re.escape(username)}_.*')
         max_num = 0
         
-        if os.path.exists(output_dir):
-            for filename in os.listdir(output_dir):
+        if os.path.exists(abs_output_dir):
+            for filename in os.listdir(abs_output_dir):
                 if pattern.match(filename):
                     try:
                         num = int(filename.split('_')[0])
@@ -818,7 +872,7 @@ TRANSCRIPT:
             self.log_error(f"Error checking existing transcription for {video_id}", e)
             return False
     
-    async def _update_video_transcription(self, video_id: str, transcript: str, smart_name: str, video_path: str, thumbnail_path: str = None, metadata: dict = None):
+    async def _update_video_transcription(self, video_id: str, transcript: str, smart_name: str, video_path: str, thumbnail_path: str = None, metadata: dict = None, audio_path: str = None, transcript_path: str = None):
         """Update video record with transcription data and metadata"""
         try:
             # Find existing video record
@@ -829,10 +883,16 @@ TRANSCRIPT:
                     video_record = video
                     break
             
+            # Ensure all paths are absolute before saving to database
+            abs_video_path = os.path.abspath(video_path) if video_path else ''
+            abs_audio_path = os.path.abspath(audio_path) if audio_path else ''
+            abs_transcript_path = os.path.abspath(transcript_path) if transcript_path else ''
+            abs_thumbnail_path = os.path.abspath(thumbnail_path) if thumbnail_path else ''
+            
             # Prepare video data with metadata
             video_data = {
                 'filename': video_record.get('filename', f"{video_id}.mp4") if video_record else f"{video_id}.mp4",
-                'file_path': video_path,
+                'file_path': abs_video_path,
                 'url': video_record.get('url', '') if video_record else '',
                 'drive_id': video_record.get('drive_id', '') if video_record else '',
                 'drive_url': video_record.get('drive_url', '') if video_record else '',
@@ -840,7 +900,9 @@ TRANSCRIPT:
                 'transcription_status': 'COMPLETED',
                 'transcription_text': transcript,
                 'smart_name': smart_name,
-                'file_hash': video_record.get('file_hash', '') if video_record else ''
+                'file_hash': video_record.get('file_hash', '') if video_record else '',
+                'audio_file_path': abs_audio_path,
+                'transcript_file_path': abs_transcript_path
             }
             
             # Add metadata if available
@@ -871,11 +933,60 @@ TRANSCRIPT:
             await db_manager.upsert_video(video_data)
             self.log_step(f"Updated video record with transcription and metadata")
             
+            # Update URLs table to link video_id if URL exists
+            video_url = video_data.get('url', '')
+            if video_url:
+                try:
+                    # Check if URL exists in urls table
+                    url_exists = await db_manager.url_exists(video_url)
+                    if url_exists:
+                        # Update the URL entry with video_id and transcription_status
+                        update_success = await db_manager.update_url_status(
+                            url=video_url,
+                            video_id=video_id,
+                            transcription_status='COMPLETED',
+                            notes=f'Linked to transcribed video (ID: {video_id})'
+                        )
+                        if update_success:
+                            self.log_step(f"Updated URLs table with video_id {video_id} for URL: {video_url}")
+                        else:
+                            self.log_error(f"Failed to update URLs table with video_id for URL: {video_url}")
+                    else:
+                        # URL doesn't exist in urls table - try to find by video_id and update URL
+                        try:
+                            async with db_manager.get_connection() as conn:
+                                # Check if there's a URL entry with this video_id but different URL
+                                cursor = await conn.execute("SELECT url FROM urls WHERE video_id = ?", (video_id,))
+                                row = await cursor.fetchone()
+                                if row:
+                                    existing_url = row[0]
+                                    self.log_step(f"Found URL entry with video_id {video_id} but different URL: {existing_url}")
+                        except Exception as e:
+                            self.log_error(f"Error checking URLs table by video_id: {e}")
+                except Exception as e:
+                    self.log_error(f"Error updating URLs table: {e}")
+            
+            # Also try to update by video_id if URL is not available
+            if not video_url:
+                try:
+                    # Find URL entry by video_id
+                    async with db_manager.get_connection() as conn:
+                        cursor = await conn.execute("SELECT url FROM urls WHERE video_id = ?", (video_id,))
+                        row = await cursor.fetchone()
+                        if row:
+                            url_from_db = row[0]
+                            # URL entry already has video_id, so JOIN will work automatically
+                            self.log_step(f"URL entry found with video_id {video_id}, transcription status will be visible via JOIN")
+                        else:
+                            self.log_step(f"No URL entry found with video_id {video_id}")
+                except Exception as e:
+                    self.log_error(f"Error checking URLs table by video_id: {e}")
+            
             # Update thumbnail if provided
-            if thumbnail_path:
+            if abs_thumbnail_path:
                 await db_manager.upsert_thumbnail({
-                    'filename': os.path.basename(thumbnail_path),
-                    'file_path': thumbnail_path,
+                    'filename': os.path.basename(abs_thumbnail_path),
+                    'file_path': abs_thumbnail_path,
                     'video_filename': f"{video_id}.mp4",
                     'drive_id': '',
                     'drive_url': '',
@@ -887,9 +998,54 @@ TRANSCRIPT:
             self.log_error(f"Error updating video transcription: {str(e)}")
     
     async def download_video_only(self, url: str, index: int) -> bool:
-        """Download video and extract metadata only (no transcription)"""
+        """Download video and extract metadata only (no transcription, no upload)
+        Returns True if downloaded, False if failed, or raises AlreadyDownloadedException if already exists"""
         try:
-            self.log_step(f"Starting download-only processing for video {index}")
+            self.log_step(f"DOWNLOAD ONLY: Starting download-only processing for video {index} (NO transcription, NO upload)")
+            
+            # Check if video is already downloaded BEFORE attempting download
+            video_id = self._extract_video_id(url)
+            
+            # Check 1: Check database by URL
+            try:
+                async with db_manager.get_connection() as conn:
+                    cursor = await conn.execute("SELECT * FROM video_transcripts WHERE url = ?", (url,))
+                    row = await cursor.fetchone()
+                    if row:
+                        cursor = await conn.execute("PRAGMA table_info(video_transcripts)")
+                        columns = [col[1] for col in await cursor.fetchall()]
+                        existing_video_by_url = dict(zip(columns, row))
+                        file_path = existing_video_by_url.get('file_path', '')
+                        if file_path and os.path.exists(file_path):
+                            self.log_step(f"SKIP: Video already downloaded (found in database by URL): {url}")
+                            self.log_step(f"Existing file: {file_path}")
+                            raise AlreadyDownloadedException(f"Video already downloaded: {url}", file_path, existing_video_by_url)
+            except AlreadyDownloadedException:
+                raise
+            except Exception as e:
+                self.log_error(f"Error checking database by URL: {e}")
+            
+            # Check 2: Check database by video_id
+            if video_id:
+                existing_video_by_id = await db_manager.get_video_transcript_by_id(video_id)
+                if existing_video_by_id:
+                    file_path = existing_video_by_id.get('file_path', '')
+                    if file_path and os.path.exists(file_path):
+                        self.log_step(f"SKIP: Video already downloaded (found in database by video_id): {video_id}")
+                        self.log_step(f"Existing file: {file_path}")
+                        raise AlreadyDownloadedException(f"Video already downloaded (ID: {video_id})", file_path, existing_video_by_id)
+            
+            # Check 3: Check file system for video file
+            if video_id and os.path.exists(self.video_output_dir):
+                for file in os.listdir(self.video_output_dir):
+                    if video_id in file and file.endswith(('.mp4', '.webm', '.mkv')):
+                        full_path = os.path.join(self.video_output_dir, file)
+                        if os.path.exists(full_path):
+                            self.log_step(f"SKIP: Video file already exists on disk: {file}")
+                            self.log_step(f"Existing file: {full_path}")
+                            # Try to get metadata from database or extract from file
+                            existing_video = await db_manager.get_video_transcript_by_id(video_id)
+                            raise AlreadyDownloadedException(f"Video file already exists: {file}", full_path, existing_video)
             
             # Step 1: Download video and extract metadata
             video_path, metadata, raw_info = await self._download_video_and_metadata(url, index)
@@ -916,10 +1072,14 @@ TRANSCRIPT:
             )
             
             # Step 4: Save to database (without transcription data)
+            # Ensure all paths are absolute before saving to database
+            abs_video_path = os.path.abspath(video_path) if video_path else ''
+            abs_thumbnail_path = os.path.abspath(thumbnail_path) if thumbnail_path else ''
+            
             video_data = {
                 'video_id': metadata.get('video_id', ''),
-                'filename': os.path.basename(video_path),
-                'file_path': video_path,
+                'filename': os.path.basename(abs_video_path),
+                'file_path': abs_video_path,
                 'url': url,
                 'title': metadata.get('title', ''),
                 'description': metadata.get('description', ''),
@@ -943,7 +1103,7 @@ TRANSCRIPT:
                 'transcription_text': '',  # Empty for download-only
                 'transcription_status': 'PENDING',  # Will be processed later
                 'smart_name': generated_name,
-                'thumbnail_file_path': thumbnail_path if thumbnail_path else '',
+                'thumbnail_file_path': abs_thumbnail_path if abs_thumbnail_path else '',
                 'video_file_size_mb': metadata.get('file_size_mb', 0),
                 'transcript_word_count': 0,  # Will be filled during transcription
                 'processing_time_seconds': 0,  # Will be filled during transcription
@@ -958,10 +1118,71 @@ TRANSCRIPT:
             success = await db_manager.upsert_video_transcript(video_data)
             if success:
                 self.log_step(f"Video {index} data saved to database")
+                
+                # Update URL status in urls table
+                video_id = metadata.get('video_id', '')
+                from datetime import datetime
+                
+                # Check if URL exists in database, add it if not
+                url_exists = await db_manager.url_exists(url)
+                if not url_exists:
+                    # Add URL to database if it doesn't exist
+                    await db_manager.add_url(
+                        url=url,
+                        source='download',
+                        status='DOWNLOADED',
+                        download_status='DOWNLOADED',
+                        notes=f'Added during download process'
+                    )
+                    self.log_step(f"Added URL to database: {url}")
+                
+                # Update URL status (update both status and download_status)
+                if video_id:
+                    update_success = await db_manager.update_url_status(
+                        url=url,
+                        status='DOWNLOADED',  # Also update status field
+                        download_status='DOWNLOADED',
+                        video_id=video_id,
+                        downloaded_at=datetime.now().isoformat(),
+                        notes=f'Downloaded as video_id: {video_id}'
+                    )
+                    if update_success:
+                        self.log_step(f"URL status updated to DOWNLOADED for: {url} (video_id: {video_id})")
+                    else:
+                        self.log_error(f"Failed to update URL status for: {url}")
+                else:
+                    # Update without video_id if it's not available
+                    update_success = await db_manager.update_url_status(
+                        url=url,
+                        status='DOWNLOADED',  # Also update status field
+                        download_status='DOWNLOADED',
+                        downloaded_at=datetime.now().isoformat(),
+                        notes='Downloaded successfully'
+                    )
+                    if update_success:
+                        self.log_step(f"URL status updated to DOWNLOADED for: {url} (no video_id)")
+                    else:
+                        self.log_error(f"Failed to update URL status for: {url}")
+                
                 self.processed_count += 1
+                # Convert to absolute path for clarity
+                abs_video_path = os.path.abspath(video_path)
+                self.log_step(f"DOWNLOAD ONLY: Video {index} downloaded successfully (NO transcription, NO upload performed)")
+                self.log_step(f"Downloaded file location: {abs_video_path}")
+                print(f"\n{'='*60}")
+                print(f"DOWNLOAD COMPLETE: Video {index}")
+                print(f"File saved to: {abs_video_path}")
+                print(f"{'='*60}\n")
                 return True
             else:
                 self.log_error(f"Failed to save video {index} data to database")
+                # Update URL status to FAILED
+                from datetime import datetime
+                await db_manager.update_url_status(
+                    url=url,
+                    download_status='FAILED',
+                    notes='Failed to save video data to database'
+                )
                 return False
                 
         except Exception as e:

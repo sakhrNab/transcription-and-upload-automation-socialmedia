@@ -61,7 +61,8 @@ class DatabaseAPI:
     async def get_urls_from_file(self):
         """Load URLs from actual urls.txt file"""
         try:
-            urls_file = Path("../urls.txt")
+            project_root = Path(__file__).parent.parent
+            urls_file = project_root / "urls.txt"
             if not urls_file.exists():
                 return []
             
@@ -76,13 +77,14 @@ class DatabaseAPI:
     async def get_downloaded_videos(self):
         """Get videos from file system for transcription (assets/downloads/videos)"""
         try:
-            # Scan videos directory for downloaded videos
-            videos_dir = Path("../assets/downloads/videos")
+            # Scan canonical project assets directory for downloaded videos
+            project_root = Path(__file__).parent.parent
+            videos_dir = project_root / "assets" / "downloads" / "videos"
             if not videos_dir.exists():
                 return []
             
             # Get all available thumbnails for matching
-            thumbnails_dir = Path("../assets/downloads/thumbnails")
+            thumbnails_dir = project_root / "assets" / "downloads" / "thumbnails"
             available_thumbnails = set()
             if thumbnails_dir.exists():
                 for thumb_file in thumbnails_dir.rglob("*.webp"):
@@ -160,12 +162,14 @@ class DatabaseAPI:
         """Get finished videos from file system for upload (since they're manually edited)"""
         try:
             # Scan finished videos directory for manually edited videos
-            finished_dir = Path("../assets/finished_videos")
+            # Use canonical finished videos directory under project root
+            project_root = Path(__file__).parent.parent
+            finished_dir = project_root / "assets" / "finished_videos"
             if not finished_dir.exists():
                 return []
             
             # Get all available thumbnails for matching
-            thumbnails_dir = Path("../assets/downloads/thumbnails")
+            thumbnails_dir = project_root / "assets" / "downloads" / "thumbnails"
             available_thumbnails = set()
             if thumbnails_dir.exists():
                 for thumb_file in thumbnails_dir.rglob("*.webp"):
@@ -214,7 +218,7 @@ class DatabaseAPI:
                         'uploadStatus': 'PENDING',
                         'thumbnail': f'/thumbnails/{thumbnail_filename}' if thumbnail_filename else '/placeholder-thumbnail.jpg',
                         'path': str(video_file),
-                        'thumbnailPath': f"../assets/downloads/thumbnails/{thumbnail_filename}" if thumbnail_filename else None,
+                        'thumbnailPath': f"/thumbnails/{thumbnail_filename}" if thumbnail_filename else None,
                         'created_at': datetime.fromtimestamp(video_file.stat().st_ctime).strftime('%Y-%m-%d %H:%M:%S')
                     })
                 except Exception as e:
@@ -229,7 +233,8 @@ class DatabaseAPI:
     async def get_thumbnails(self):
         """Get thumbnails for upload"""
         try:
-            thumbnails_dir = Path("../assets/downloads/thumbnails")
+            project_root = Path(__file__).parent.parent
+            thumbnails_dir = project_root / "assets" / "downloads" / "thumbnails"
             if not thumbnails_dir.exists():
                 return []
             
@@ -353,9 +358,10 @@ def get_status():
 def get_thumbnail(filename):
     """Serve thumbnail images"""
     try:
-        thumbnails_dir = Path("../assets/downloads/thumbnails")
+        project_root = Path(__file__).parent.parent
+        thumbnails_dir = project_root / "assets" / "downloads" / "thumbnails"
         thumbnail_path = thumbnails_dir / filename
-        
+
         if thumbnail_path.exists():
             return send_from_directory(str(thumbnails_dir), filename)
         else:

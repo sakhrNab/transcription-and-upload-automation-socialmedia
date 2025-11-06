@@ -24,14 +24,20 @@ class ThumbnailProcessor(BaseProcessor):
         super().__init__("ThumbnailProcessor")
         self.processed_count = 0
         self.failed_count = 0
+        
+        # Get project root directory (parent of core/processors/)
+        project_root = Path(__file__).parent.parent.parent
+        
+        # Configuration - use absolute paths based on project root
+        self.thumbnails_dir = str(project_root / "assets" / "downloads" / "thumbnails")
     
     async def initialize(self) -> bool:
         """Initialize thumbnail processor"""
         try:
             self.log_step("Initializing thumbnail processor")
             
-            # Ensure required directories exist
-            os.makedirs('assets/downloads/thumbnails', exist_ok=True)
+            # Ensure required directories exist - use absolute path
+            os.makedirs(self.thumbnails_dir, exist_ok=True)
             
             self.initialized = True
             self.status = "ready"

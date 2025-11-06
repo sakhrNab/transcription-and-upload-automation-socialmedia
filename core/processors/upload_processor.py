@@ -39,8 +39,11 @@ class UploadProcessor(BaseProcessor):
         self.failed_count = 0
         
         # Configuration
-        self.video_folder = "assets/finished_videos"
-        self.thumbnails_folder = "assets/downloads/thumbnails"
+        # Use project-root absolute paths to avoid CWD differences
+        project_root = Path(__file__).parent.parent.parent
+        self.video_folder = str(project_root / "assets" / "finished_videos")
+        self.thumbnails_folder = str(project_root / "assets" / "downloads" / "thumbnails")
+        self.transcripts_dir = str(project_root / "assets" / "downloads" / "transcripts")
         self.drive_folder = "AIWaverider"
         self.thumbnails_drive_folder_id = "1iUmCVkX863MqyvJIZ_aWbi9toEI39X8Z"
         
@@ -605,8 +608,9 @@ class UploadProcessor(BaseProcessor):
     def _find_tracking_files(self) -> List[str]:
         """Find all tracking data files to upload"""
         files = []
+        project_root = Path(__file__).parent.parent.parent
         tracking_dirs = [
-            'assets/downloads/socialmedia/tracking',
+            str(project_root / 'assets' / 'downloads' / 'socialmedia' / 'tracking'),
             'data/tracking',
             'tracking_data'
         ]

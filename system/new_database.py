@@ -171,6 +171,31 @@ class NewDatabaseManager:
             )
         """)
         
+        # Create urls table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS urls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT UNIQUE NOT NULL,
+                source TEXT DEFAULT 'manual',
+                status TEXT DEFAULT 'PENDING',
+                download_status TEXT DEFAULT 'PENDING',
+                video_id TEXT,
+                downloaded_at TIMESTAMP,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (video_id) REFERENCES video_transcripts(video_id)
+            )
+        """)
+        
+        # Create index for urls
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_urls_url ON urls(url);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_urls_status ON urls(status);
+        """)
+        
         await conn.commit()
         await conn.close()
         logger.log_step("Tables created manually")
@@ -807,6 +832,288 @@ class NewDatabaseManager:
         except Exception as e:
             logger.log_error(f"Error getting videos with transcripts: {str(e)}")
             return []
+    
+    # URLs Methods
+    async def _ensure_urls_table_exists(self):
+        """Ensure URLs table exists with all required columns, create or migrate if needed"""
+        try:
+            async with self.get_connection() as conn:
+                # Check if table exists
+                cursor = await conn.execute("""
+                    SELECT name FROM sqlite_master WHERE type='table' AND name='urls'
+                """)
+                exists = await cursor.fetchone()
+                
+                if not exists:
+                    # Create the table with all columns
+                    await conn.execute("""
+                        CREATE TABLE IF NOT EXISTS urls (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            url TEXT UNIQUE NOT NULL,
+                            source TEXT DEFAULT 'manual',
+                            status TEXT DEFAULT 'PENDING',
+                            download_status TEXT DEFAULT 'PENDING',
+                            video_id TEXT,
+                            downloaded_at TIMESTAMP,
+                            transcription_status TEXT DEFAULT 'PENDING',
+                            notes TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (video_id) REFERENCES video_transcripts(video_id)
+                        )
+                    """)
+                    await conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_url ON urls(url)")
+                    await conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_status ON urls(status)")
+                    await conn.commit()
+                    logger.log_step("URLs table created")
+                else:
+                    # Table exists, check for missing columns and add them
+                    cursor = await conn.execute("PRAGMA table_info(urls)")
+                    columns = [col[1] for col in await cursor.fetchall()]
+                    
+                    # Add missing columns
+                    if 'download_status' not in columns:
+                        await conn.execute("ALTER TABLE urls ADD COLUMN download_status TEXT DEFAULT 'PENDING'")
+                        logger.log_step("Added download_status column to urls table")
+                    
+                    if 'video_id' not in columns:
+                        await conn.execute("ALTER TABLE urls ADD COLUMN video_id TEXT")
+                        logger.log_step("Added video_id column to urls table")
+                    
+                    if 'downloaded_at' not in columns:
+                        await conn.execute("ALTER TABLE urls ADD COLUMN downloaded_at TIMESTAMP")
+                        logger.log_step("Added downloaded_at column to urls table")
+                    
+                    if 'transcription_status' not in columns:
+                        await conn.execute("ALTER TABLE urls ADD COLUMN transcription_status TEXT DEFAULT 'PENDING'")
+                        logger.log_step("Added transcription_status column to urls table")
+                    
+                    await conn.commit()
+        except Exception as e:
+            logger.log_error(f"Error ensuring URLs table exists: {str(e)}")
+    
+    async def add_url(self, url: str, source: str = 'manual', status: str = 'PENDING', download_status: str = 'PENDING', notes: str = None) -> bool:
+        """Add a URL to the database"""
+        try:
+            # Ensure table exists first
+            await self._ensure_urls_table_exists()
+            
+            async with self.get_connection() as conn:
+                await conn.execute("""
+                    INSERT OR IGNORE INTO urls (url, source, status, download_status, notes, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (url, source, status, download_status, notes, datetime.now().isoformat()))
+                await conn.commit()
+                return True
+        except Exception as e:
+            logger.log_error(f"Error adding URL: {str(e)}")
+            return False
+    
+    async def get_all_urls(self, status: str = None) -> List[Dict[str, Any]]:
+        """Get all URLs from database with video transcript info, optionally filtered by status"""
+        try:
+            # Ensure table exists and has all columns
+            await self._ensure_urls_table_exists()
+            
+            async with self.get_connection() as conn:
+                # Check if video_id column exists
+                cursor = await conn.execute("PRAGMA table_info(urls)")
+                columns_info = await cursor.fetchall()
+                url_columns = [col[1] for col in columns_info]
+                has_video_id = 'video_id' in url_columns
+                
+                # Check if transcription_status column exists in urls table
+                has_transcription_status = 'transcription_status' in url_columns
+                
+                if has_video_id:
+                    # Use JOIN if video_id column exists
+                    # Prefer transcription_status from urls table, fallback to video_transcripts
+                    if status:
+                        if has_transcription_status:
+                            # Use transcription_status from urls table directly, sync with video_transcripts if needed
+                            cursor = await conn.execute("""
+                                SELECT 
+                                    u.id, u.url, u.source, u.status, u.download_status, u.video_id, 
+                                    u.downloaded_at, u.transcription_status, u.notes, u.created_at, u.updated_at,
+                                    COALESCE(u.transcription_status, v.transcription_status, v2.transcription_status) as transcription_status,
+                                    COALESCE(v.filename, v2.filename) as video_filename,
+                                    COALESCE(v.smart_name, v2.smart_name) as video_name
+                                FROM urls u
+                                LEFT JOIN video_transcripts v ON u.video_id = v.video_id AND u.video_id IS NOT NULL
+                                LEFT JOIN video_transcripts v2 ON u.url = v2.url AND (u.video_id IS NULL OR v.transcription_status IS NULL)
+                                WHERE u.status = ? 
+                                ORDER BY u.created_at DESC
+                            """, (status,))
+                        else:
+                            # Fallback to old JOIN method if column doesn't exist
+                            cursor = await conn.execute("""
+                                SELECT 
+                                    u.id, u.url, u.source, u.status, u.download_status, u.video_id, 
+                                    u.downloaded_at, u.notes, u.created_at, u.updated_at,
+                                    COALESCE(v.transcription_status, v2.transcription_status) as transcription_status,
+                                    COALESCE(v.filename, v2.filename) as video_filename,
+                                    COALESCE(v.smart_name, v2.smart_name) as video_name
+                                FROM urls u
+                                LEFT JOIN video_transcripts v ON u.video_id = v.video_id AND u.video_id IS NOT NULL
+                                LEFT JOIN video_transcripts v2 ON u.url = v2.url AND (u.video_id IS NULL OR v.transcription_status IS NULL)
+                                WHERE u.status = ? 
+                                ORDER BY u.created_at DESC
+                            """, (status,))
+                    else:
+                        if has_transcription_status:
+                            # Use transcription_status from urls table directly
+                            cursor = await conn.execute("""
+                                SELECT 
+                                    u.id, u.url, u.source, u.status, u.download_status, u.video_id, 
+                                    u.downloaded_at, u.notes, u.created_at, u.updated_at,
+                                    COALESCE(u.transcription_status, v.transcription_status, v2.transcription_status) as transcription_status,
+                                    COALESCE(v.filename, v2.filename) as video_filename,
+                                    COALESCE(v.smart_name, v2.smart_name) as video_name
+                                FROM urls u
+                                LEFT JOIN video_transcripts v ON u.video_id = v.video_id AND u.video_id IS NOT NULL
+                                LEFT JOIN video_transcripts v2 ON u.url = v2.url AND (u.video_id IS NULL OR v.transcription_status IS NULL)
+                                ORDER BY u.created_at DESC
+                            """)
+                        else:
+                            # Fallback to old JOIN method if column doesn't exist
+                            cursor = await conn.execute("""
+                                SELECT 
+                                    u.id, u.url, u.source, u.status, u.download_status, u.video_id, 
+                                    u.downloaded_at, u.notes, u.created_at, u.updated_at,
+                                    COALESCE(v.transcription_status, v2.transcription_status) as transcription_status,
+                                    COALESCE(v.filename, v2.filename) as video_filename,
+                                    COALESCE(v.smart_name, v2.smart_name) as video_name
+                                FROM urls u
+                                LEFT JOIN video_transcripts v ON u.video_id = v.video_id AND u.video_id IS NOT NULL
+                                LEFT JOIN video_transcripts v2 ON u.url = v2.url AND (u.video_id IS NULL OR v.transcription_status IS NULL)
+                                ORDER BY u.created_at DESC
+                            """)
+                else:
+                    # Fallback: get URLs without JOIN if video_id doesn't exist
+                    if status:
+                        cursor = await conn.execute("""
+                            SELECT * FROM urls WHERE status = ? ORDER BY created_at DESC
+                        """, (status,))
+                    else:
+                        cursor = await conn.execute("""
+                            SELECT * FROM urls ORDER BY created_at DESC
+                        """)
+                
+                rows = await cursor.fetchall()
+                
+                # Get column names from the actual query result (cursor.description)
+                # This is the correct way to get column names from a SELECT query
+                if cursor.description:
+                    all_columns = [col[0] for col in cursor.description]
+                else:
+                    # Fallback: use table_info
+                    url_columns = [col[1] for col in columns_info]
+                    if has_video_id:
+                        all_columns = url_columns + ['transcription_status', 'video_filename', 'video_name']
+                    else:
+                        all_columns = url_columns + ['transcription_status', 'video_filename', 'video_name']
+                        # Pad rows with None for missing join columns
+                        rows = [row + (None, None, None) for row in rows]
+                
+                # Convert rows to dictionaries
+                result = []
+                for row in rows:
+                    row_dict = dict(zip(all_columns, row))
+                    # Ensure transcription_status is set (might be None from JOIN)
+                    if row_dict.get('transcription_status') is None:
+                        # Try to get it directly from video_transcripts if we have video_id or url
+                        video_id = row_dict.get('video_id')
+                        url = row_dict.get('url')
+                        if video_id or url:
+                            try:
+                                async with self.get_connection() as conn:
+                                    if video_id:
+                                        cursor = await conn.execute(
+                                            "SELECT transcription_status FROM video_transcripts WHERE video_id = ?",
+                                            (video_id,)
+                                        )
+                                    elif url:
+                                        cursor = await conn.execute(
+                                            "SELECT transcription_status FROM video_transcripts WHERE url = ?",
+                                            (url,)
+                                        )
+                                    else:
+                                        cursor = None
+                                    
+                                    if cursor:
+                                        status_row = await cursor.fetchone()
+                                        if status_row:
+                                            row_dict['transcription_status'] = status_row[0]
+                            except Exception as e:
+                                logger.log_error(f"Error fetching transcription_status: {e}")
+                    result.append(row_dict)
+                
+                return result
+        except Exception as e:
+            logger.log_error(f"Error getting URLs: {str(e)}")
+            return []
+    
+    async def update_url_status(self, url: str, status: str = None, download_status: str = None, video_id: str = None, downloaded_at: str = None, transcription_status: str = None, notes: str = None) -> bool:
+        """Update URL status and download info"""
+        try:
+            # Ensure table exists with all columns
+            await self._ensure_urls_table_exists()
+            
+            async with self.get_connection() as conn:
+                # Check which columns exist
+                cursor = await conn.execute("PRAGMA table_info(urls)")
+                columns_info = await cursor.fetchall()
+                existing_columns = [col[1] for col in columns_info]
+                
+                updates = []
+                values = []
+                
+                if status is not None and 'status' in existing_columns:
+                    updates.append("status = ?")
+                    values.append(status)
+                if download_status is not None and 'download_status' in existing_columns:
+                    updates.append("download_status = ?")
+                    values.append(download_status)
+                if video_id is not None and 'video_id' in existing_columns:
+                    updates.append("video_id = ?")
+                    values.append(video_id)
+                if downloaded_at is not None and 'downloaded_at' in existing_columns:
+                    updates.append("downloaded_at = ?")
+                    values.append(downloaded_at)
+                if transcription_status is not None and 'transcription_status' in existing_columns:
+                    updates.append("transcription_status = ?")
+                    values.append(transcription_status)
+                if notes is not None and 'notes' in existing_columns:
+                    updates.append("notes = ?")
+                    values.append(notes)
+                
+                if 'updated_at' in existing_columns:
+                    updates.append("updated_at = ?")
+                    values.append(datetime.now().isoformat())
+                
+                values.append(url)
+                
+                if updates:
+                    query = f"UPDATE urls SET {', '.join(updates)} WHERE url = ?"
+                    await conn.execute(query, values)
+                    await conn.commit()
+                    logger.log_step(f"Updated URL status for: {url} (download_status={download_status}, video_id={video_id})")
+                    return True
+                return False
+        except Exception as e:
+            logger.log_error(f"Error updating URL status: {str(e)}")
+            return False
+    
+    async def url_exists(self, url: str) -> bool:
+        """Check if URL exists in database"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute("SELECT COUNT(*) FROM urls WHERE url = ?", (url,))
+                count = await cursor.fetchone()
+                return count[0] > 0 if count else False
+        except Exception as e:
+            logger.log_error(f"Error checking URL existence: {str(e)}")
+            return False
 
 # Global instance
 # Use db/social_media.db if it exists, otherwise fall back to social_media.db

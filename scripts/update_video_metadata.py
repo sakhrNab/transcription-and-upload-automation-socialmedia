@@ -71,9 +71,10 @@ async def update_video_metadata():
         videos = await db_manager.get_all_videos()
         print(f"Found {len(videos)} videos in database")
         
-        # Get transcript files
-        transcript_dir = Path("assets/downloads/transcripts")
-        transcript_files = list(transcript_dir.glob("*.txt"))
+        # Get transcript files from canonical project assets directory
+        project_root = Path(__file__).parent.parent
+        transcript_dir = project_root / "assets" / "downloads" / "transcripts"
+        transcript_files = list(transcript_dir.glob("*.txt")) if transcript_dir.exists() else []
         print(f"Found {len(transcript_files)} transcript files")
         
         updated_count = 0

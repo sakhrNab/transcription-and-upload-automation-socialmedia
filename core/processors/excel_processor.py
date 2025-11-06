@@ -9,6 +9,7 @@ import asyncio
 import os
 import sys
 import time
+from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -42,14 +43,15 @@ class ExcelProcessor(BaseProcessor):
         self.processed_count = 0
         self.failed_count = 0
         
-        # Configuration
-        self.transcripts_dir = "assets/downloads/transcripts"
+        # Configuration - use project-root absolute paths to avoid CWD issues
+        project_root = Path(__file__).parent.parent.parent
+        self.transcripts_dir = str(project_root / "assets" / "downloads" / "transcripts")
         self.excel_filename = os.getenv("EXCEL_FILENAME", "video_transcripts.xlsx")
         self.excel_file_path = os.path.join(self.transcripts_dir, self.excel_filename)
         # Use a specific folder for Excel files, not the general GOOGLE_DRIVE_FOLDER env var
         self.drive_folder = "VideoTranscripts"
         self.log_step(f"Excel processor initialized with drive folder: {self.drive_folder}")
-        
+
         # Google Drive configuration
         self.scopes = ['https://www.googleapis.com/auth/drive.file']
         self.credentials_file = settings.google_credentials_file
@@ -84,7 +86,7 @@ class ExcelProcessor(BaseProcessor):
         try:
             self.log_step("Initializing Excel processor")
             
-            # Create transcripts directory
+            # Create transcripts directory (canonical location)
             os.makedirs(self.transcripts_dir, exist_ok=True)
             
             self.initialized = True

@@ -99,6 +99,9 @@
                             <div class="url-list" id="urlList">
                                 <!-- URLs will be loaded here -->
                             </div>
+                            <div class="pagination-container" id="urlListPagination">
+                                <!-- Pagination controls will be added here -->
+                            </div>
                             <div class="selection-info">
                                 <span class="selection-count">0 URLs selected</span>
                                 <span class="max-warning">Maximum 5 videos per run</span>
@@ -121,7 +124,25 @@
 
                         <!-- Download Progress -->
                         <div class="section" id="downloadProgressSection" style="display: none;">
-                            <h3>Download Progress</h3>
+                            <div class="section-header">
+                                <h3>Download Progress</h3>
+                            </div>
+                            <!-- Main Progress Bar -->
+                            <div class="progress-container" style="margin-bottom: 1.5rem;">
+                                <div class="progress-header">
+                                    <span id="downloadProgressText" class="progress-text">Starting download...</span>
+                                    <span id="downloadProgressPercent" class="progress-percent">0%</span>
+                                </div>
+                                <div class="progress-bar-container">
+                                    <div class="progress-bar-fill" id="downloadProgressBar" style="width: 0%;"></div>
+                                </div>
+                                <div class="progress-stats" id="downloadProgressStats" style="margin-top: 0.5rem; font-size: 0.9rem; color: #666;">
+                                    <span>Completed: <strong id="downloadCompleted">0</strong></span>
+                                    <span style="margin-left: 1rem;">Failed: <strong id="downloadFailed">0</strong></span>
+                                    <span style="margin-left: 1rem;">Total: <strong id="downloadTotal">0</strong></span>
+                                </div>
+                            </div>
+                            <!-- Individual Video Progress -->
                             <div class="progress-grid" id="downloadProgressGrid">
                                 <!-- Progress items will be added here -->
                             </div>
@@ -170,6 +191,37 @@
                                         </tr>
                                     </thead>
                                     <tbody id="downloadDataBody">
+                                        <!-- Data will be loaded here -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- URLs Tracking Table -->
+                        <div class="data-section">
+                            <div class="data-header">
+                                <h3>URLs Tracking</h3>
+                                <div class="data-actions">
+                                    <button class="btn btn-outline" id="refreshUrlsTable">
+                                        <i class="fas fa-sync-alt"></i>
+                                        Refresh
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="data-table-container">
+                                <table class="data-table" id="urlsTable">
+                                    <thead>
+                                        <tr>
+                                            <th>URL</th>
+                                            <th>Source</th>
+                                            <th>Download Status</th>
+                                            <th>Date Added</th>
+                                            <th>Date Downloaded</th>
+                                            <th>Video Name</th>
+                                            <th>Transcription Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="urlsTableBody">
                                         <!-- Data will be loaded here -->
                                     </tbody>
                                 </table>

@@ -13,6 +13,10 @@ class SocialMediaProcessor {
             transcribe: 0,
             upload: 0
         };
+        // Pagination for URL list
+        this.urlListCurrentPage = 1;
+        this.urlListItemsPerPage = 4;
+        this.urlListAllItems = [];
         
         this.init();
     }
@@ -46,6 +50,9 @@ class SocialMediaProcessor {
         // Download tab events
         document.getElementById('refreshUrls').addEventListener('click', () => {
             this.loadUrls();
+        });
+        document.getElementById('refreshUrlsTable').addEventListener('click', () => {
+            this.loadUrlsTable();
         });
         document.getElementById('selectAllUrls').addEventListener('click', () => {
             this.selectAllUrls();
@@ -203,6 +210,7 @@ class SocialMediaProcessor {
 
     async loadInitialData() {
         await this.loadUrls();
+        await this.loadUrlsTable();
         await this.loadVideos();
         await this.loadFinishedVideos();
         await this.loadThumbnails();
@@ -214,45 +222,329 @@ class SocialMediaProcessor {
 
     async loadUrls() {
         try {
+            // Reset to page 1 when loading URLs
+            this.urlListCurrentPage = 1;
             const response = await fetch('/api/urls');
             const data = await response.json();
-            this.displayUrls(data.urls);
+            // Use urls_with_metadata to get status information
+            const urlsWithMetadata = data.urls_with_metadata || [];
+            this.displayUrls(urlsWithMetadata);
         } catch (error) {
             this.showToast('Error loading URLs', 'error');
             console.error('Error loading URLs:', error);
         }
     }
 
+    async loadUrlsTable() {
+        try {
+            const response = await fetch('/api/urls');
+            const data = await response.json();
+            
+            // Debug logging
+            console.log('URLs API response:', data);
+            console.log('URLs with metadata:', data.urls_with_metadata);
+            
+            if (!data.success) {
+                console.error('API returned error:', data.error);
+                this.showToast(`Error loading URLs: ${data.error}`, 'error');
+                return;
+            }
+            
+            const urlsWithMetadata = data.urls_with_metadata || [];
+            console.log(`Displaying ${urlsWithMetadata.length} URLs in table`);
+            
+            this.displayUrlsTable(urlsWithMetadata);
+        } catch (error) {
+            this.showToast('Error loading URLs table', 'error');
+            console.error('Error loading URLs table:', error);
+        }
+    }
+
+    displayUrlsTable(urls) {
+        const tbody = document.getElementById('urlsTableBody');
+        if (!tbody) return;
+        
+        tbody.innerHTML = '';
+
+        if (!urls || urls.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">No URLs found</td></tr>';
+            return;
+        }
+
+        urls.forEach((urlData) => {
+            const url = typeof urlData === 'string' ? urlData : urlData.url || '';
+            const source = urlData.source || 'file';
+            // Check both download_status and status fields
+            const downloadStatus = urlData.download_status || urlData.downloadStatus || urlData.status || 'PENDING';
+            
+            // Parse date added - handle SQLite format "YYYY-MM-DD HH:MM:SS"
+            let dateAdded = '-';
+            if (urlData.created_at) {
+                try {
+                    // SQLite format: "2025-11-06 21:37:46" - replace space with T for ISO format
+                    let dateStr = urlData.created_at;
+                    if (dateStr.includes(' ') && !dateStr.includes('T')) {
+                        dateStr = dateStr.replace(' ', 'T');
+                    }
+                    const date = new Date(dateStr);
+                    if (!isNaN(date.getTime())) {
+                        dateAdded = date.toLocaleDateString();
+                    } else {
+                        // Try Date.parse as fallback
+                        const parsed = Date.parse(urlData.created_at);
+                        if (!isNaN(parsed)) {
+                            dateAdded = new Date(parsed).toLocaleDateString();
+                        } else {
+                            dateAdded = urlData.created_at; // Fallback to raw value
+                        }
+                    }
+                } catch (e) {
+                    dateAdded = urlData.created_at || '-';
+                }
+            }
+            
+            // Handle both downloaded_at formats - SQLite format "YYYY-MM-DD HH:MM:SS" or ISO
+            let dateDownloaded = '-';
+            if (urlData.downloaded_at) {
+                try {
+                    // SQLite format: "2025-11-06 21:37:46" - replace space with T for ISO format
+                    let dateStr = urlData.downloaded_at;
+                    if (dateStr.includes(' ') && !dateStr.includes('T')) {
+                        dateStr = dateStr.replace(' ', 'T');
+                    }
+                    const date = new Date(dateStr);
+                    if (!isNaN(date.getTime())) {
+                        dateDownloaded = date.toLocaleDateString();
+                    } else {
+                        const parsed = Date.parse(urlData.downloaded_at);
+                        if (!isNaN(parsed)) {
+                            dateDownloaded = new Date(parsed).toLocaleDateString();
+                        } else {
+                            dateDownloaded = urlData.downloaded_at;
+                        }
+                    }
+                } catch (e) {
+                    dateDownloaded = urlData.downloaded_at || '-';
+                }
+            }
+            
+            // Extract video_id from URL if not provided
+            let videoId = urlData.video_id;
+            if (!videoId && url) {
+                // Try to extract video ID from URL (Instagram, YouTube, etc.)
+                const instagramMatch = url.match(/\/reel\/([A-Za-z0-9_-]+)/);
+                const youtubeMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+                videoId = instagramMatch ? instagramMatch[1] : (youtubeMatch ? youtubeMatch[1] : null);
+            }
+            
+            // Check multiple possible fields for video name
+            let videoName = urlData.video_name || urlData.video_filename || urlData.smart_name;
+            
+            // If no video name but we have video_id, try to construct a name from the URL
+            if (!videoName && videoId) {
+                // Extract username/creator from URL if possible
+                const urlParts = url.split('/');
+                const reelIndex = urlParts.findIndex(part => part === 'reel');
+                if (reelIndex > 0) {
+                    const username = urlParts[reelIndex - 1];
+                    videoName = `${username} ${videoId}`;
+                } else {
+                    videoName = videoId;
+                }
+            }
+            
+            if (!videoName) {
+                videoName = '-';
+            }
+            
+            // Handle transcription status - prioritize urls table, then video_transcripts
+            // The query returns transcription_status from COALESCE, so it should be available
+            let transcriptionStatus = 'N/A';
+            if (urlData.transcription_status) {
+                transcriptionStatus = urlData.transcription_status;
+            } else if (urlData.video_id) {
+                // If we have video_id but no transcription_status, check if it's in the database
+                // This is a fallback - the JOIN should have provided it
+                transcriptionStatus = 'PENDING';
+            }
+            
+            // Debug log to see what data we're getting
+            if (!urlData.video_name || urlData.transcription_status === 'N/A' || dateAdded === 'Invalid Date') {
+                console.log('URL data debug:', {
+                    url: url.substring(0, 50),
+                    video_id: urlData.video_id,
+                    video_name: urlData.video_name,
+                    transcription_status: urlData.transcription_status,
+                    created_at: urlData.created_at,
+                    all_keys: Object.keys(urlData)
+                });
+            }
+
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td title="${url}">${url.length > 50 ? url.substring(0, 50) + '...' : url}</td>
+                <td>${source}</td>
+                <td><span class="status-badge ${downloadStatus.toLowerCase()}">${downloadStatus}</span></td>
+                <td>${dateAdded}</td>
+                <td>${dateDownloaded}</td>
+                <td>${videoName}</td>
+                <td><span class="status-badge ${transcriptionStatus.toLowerCase().replace(' ', '-')}">${transcriptionStatus}</span></td>
+            `;
+            tbody.appendChild(row);
+        });
+    }
+
     displayUrls(urls) {
         const urlList = document.getElementById('urlList');
         urlList.innerHTML = '';
 
-        urls.forEach((url, index) => {
+        if (!urls || urls.length === 0) {
+            urlList.innerHTML = '<div class="empty-state">No URLs found</div>';
+            // Clear pagination
+            this.updateUrlListPagination(0);
+            return;
+        }
+
+        // Store all URLs for pagination
+        this.urlListAllItems = urls;
+        
+        // Separate downloaded and non-downloaded URLs
+        const downloadedUrls = [];
+        const pendingUrls = [];
+
+        urls.forEach((urlData) => {
+            const url = typeof urlData === 'string' ? urlData : urlData.url || '';
+            if (!url) return;
+
+            // Check download status
+            const downloadStatus = urlData.download_status || urlData.downloadStatus || urlData.status || 'PENDING';
+            const isDownloaded = downloadStatus === 'DOWNLOADED' || downloadStatus === 'downloaded';
+
+            if (isDownloaded) {
+                downloadedUrls.push({ url, urlData, downloadStatus });
+            } else {
+                pendingUrls.push({ url, urlData, downloadStatus });
+            }
+        });
+
+        // Sort: pending first, then downloaded
+        const sortedUrls = [...pendingUrls, ...downloadedUrls];
+        
+        // Store sorted URLs for pagination
+        this.urlListAllItems = sortedUrls;
+        
+        // Calculate pagination
+        const totalPages = Math.ceil(sortedUrls.length / this.urlListItemsPerPage);
+        if (this.urlListCurrentPage > totalPages && totalPages > 0) {
+            this.urlListCurrentPage = totalPages;
+        }
+        
+        // Get items for current page
+        const startIndex = (this.urlListCurrentPage - 1) * this.urlListItemsPerPage;
+        const endIndex = startIndex + this.urlListItemsPerPage;
+        const pageItems = sortedUrls.slice(startIndex, endIndex);
+
+        // Display items for current page
+        pageItems.forEach((item, index) => {
+            const { url, urlData, downloadStatus } = item;
+            const isDownloaded = downloadStatus === 'DOWNLOADED' || downloadStatus === 'downloaded';
+
             const urlItem = document.createElement('div');
-            urlItem.className = 'url-item';
+            urlItem.className = `url-item ${isDownloaded ? 'downloaded' : ''}`;
+            
+            // Determine status badge class and text
+            let statusClass = 'pending';
+            let statusText = 'PENDING';
+            if (isDownloaded) {
+                statusClass = 'downloaded';
+                statusText = 'DOWNLOADED';
+            } else if (downloadStatus === 'FAILED' || downloadStatus === 'failed') {
+                statusClass = 'failed';
+                statusText = 'FAILED';
+            }
+
+            // Use actual index from sorted array for unique IDs
+            const actualIndex = startIndex + index;
             urlItem.innerHTML = `
-                <input type="checkbox" class="url-checkbox" data-url="${url}" id="url-${index}">
-                <div class="url-text">${url}</div>
+                <input type="checkbox" class="url-checkbox" data-url="${url}" id="url-${actualIndex}" ${isDownloaded ? 'disabled' : ''}>
+                <div class="url-text ${isDownloaded ? 'strikethrough' : ''}">${url}</div>
                 <div class="url-status">
-                    <span class="status-badge pending">Pending</span>
+                    <span class="status-badge ${statusClass}">${statusText}</span>
                 </div>
             `;
 
-            // Add event listener for checkbox
-            const checkbox = urlItem.querySelector('.url-checkbox');
-            checkbox.addEventListener('change', (e) => {
-                if (e.target.checked) {
-                    this.selectedUrls.add(url);
-                } else {
-                    this.selectedUrls.delete(url);
-                }
-                this.updateSelectionInfo();
-            });
+            // Add event listener for checkbox (only if not disabled)
+            if (!isDownloaded) {
+                const checkbox = urlItem.querySelector('.url-checkbox');
+                checkbox.addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        this.selectedUrls.add(url);
+                    } else {
+                        this.selectedUrls.delete(url);
+                    }
+                    this.updateSelectionInfo();
+                });
+            }
 
             urlList.appendChild(urlItem);
         });
 
+        // Update pagination controls
+        this.updateUrlListPagination(sortedUrls.length);
+
         this.updateSelectionInfo();
+    }
+    
+    updateUrlListPagination(totalItems) {
+        const paginationContainer = document.getElementById('urlListPagination');
+        if (!paginationContainer) return;
+        
+        const totalPages = Math.ceil(totalItems / this.urlListItemsPerPage);
+        
+        if (totalPages <= 1) {
+            paginationContainer.innerHTML = '';
+            return;
+        }
+        
+        const prevDisabled = this.urlListCurrentPage <= 1 ? 'disabled' : '';
+        const nextDisabled = this.urlListCurrentPage >= totalPages ? 'disabled' : '';
+        
+        paginationContainer.innerHTML = `
+            <button class="btn btn-outline pagination-btn" id="urlListPrev" ${prevDisabled}>
+                <i class="fas fa-chevron-left"></i>
+                Previous
+            </button>
+            <span class="pagination-info">
+                Page ${this.urlListCurrentPage} of ${totalPages} (${totalItems} URLs)
+            </span>
+            <button class="btn btn-outline pagination-btn" id="urlListNext" ${nextDisabled}>
+                Next
+                <i class="fas fa-chevron-right"></i>
+            </button>
+        `;
+        
+        // Add event listeners
+        const prevBtn = document.getElementById('urlListPrev');
+        const nextBtn = document.getElementById('urlListNext');
+        
+        if (prevBtn && !prevDisabled) {
+            prevBtn.addEventListener('click', () => {
+                if (this.urlListCurrentPage > 1) {
+                    this.urlListCurrentPage--;
+                    this.displayUrls(this.urlListAllItems);
+                }
+            });
+        }
+        
+        if (nextBtn && !nextDisabled) {
+            nextBtn.addEventListener('click', () => {
+                const totalPages = Math.ceil(this.urlListAllItems.length / this.urlListItemsPerPage);
+                if (this.urlListCurrentPage < totalPages) {
+                    this.urlListCurrentPage++;
+                    this.displayUrls(this.urlListAllItems);
+                }
+            });
+        }
     }
 
     selectAllUrls() {
@@ -331,7 +623,7 @@ class SocialMediaProcessor {
         progressSection.style.display = 'block';
         progressGrid.innerHTML = '';
 
-        // Simulate progress tracking
+        // Track progress with polling
         const interval = setInterval(async () => {
             try {
                 const response = await fetch(`/api/progress/${taskId}`);
@@ -339,38 +631,118 @@ class SocialMediaProcessor {
                 
                 this.updateDownloadProgress(data);
                 
-                if (data.completed) {
+                // Check if completed or failed
+                if (data.status === 'completed' || data.status === 'failed') {
                     clearInterval(interval);
-                    this.showToast('Download completed', 'success');
+                    
+                    if (data.status === 'completed') {
+                        const completed = data.completed || 0;
+                        const failed = data.failed || 0;
+                        const skipped = data.skipped || 0;
+                        let message = `Download completed!`;
+                        const parts = [];
+                        if (completed > 0) parts.push(`${completed} downloaded`);
+                        if (skipped > 0) parts.push(`${skipped} already downloaded`);
+                        if (failed > 0) parts.push(`${failed} failed`);
+                        if (parts.length > 0) {
+                            message += ` (${parts.join(', ')})`;
+                        }
+                        this.showToast(message, skipped > 0 && completed === 0 ? 'info' : 'success');
+                    } else {
+                        this.showToast(`Download failed: ${data.error || 'Unknown error'}`, 'error');
+                    }
+                    
                     this.updateDatabaseStatus('updated');
-                    this.loadVideos(); // Refresh video list
+                    
+                    // Refresh data with a small delay to ensure DB is updated
+                    setTimeout(() => {
+                        this.loadVideos(); // Refresh video list
+                        this.loadUrlsTable(); // Refresh URLs table
+                    }, 500);
                 }
             } catch (error) {
                 console.error('Progress tracking error:', error);
                 clearInterval(interval);
+                this.showToast('Error tracking download progress', 'error');
             }
         }, 1000);
     }
 
     updateDownloadProgress(progressData) {
+        // Update main progress bar
+        const progressBar = document.getElementById('downloadProgressBar');
+        const progressText = document.getElementById('downloadProgressText');
+        const progressPercent = document.getElementById('downloadProgressPercent');
+        const completed = document.getElementById('downloadCompleted');
+        const failed = document.getElementById('downloadFailed');
+        const total = document.getElementById('downloadTotal');
+        
+        const progress = progressData.progress || 0;
+        const status = progressData.status || 'running';
+        const message = progressData.message || 'Processing...';
+        const completedCount = progressData.completed || 0;
+        const failedCount = progressData.failed || 0;
+        const totalCount = progressData.total || (progressData.items ? progressData.items.length : 0);
+        
+        // Update main progress bar
+        if (progressBar) {
+            progressBar.style.width = `${progress}%`;
+            if (status === 'completed') {
+                progressBar.style.backgroundColor = '#4caf50';
+            } else if (status === 'failed') {
+                progressBar.style.backgroundColor = '#f44336';
+            } else {
+                progressBar.style.backgroundColor = '#2196f3';
+            }
+        }
+        
+        if (progressText) progressText.textContent = message;
+        if (progressPercent) progressPercent.textContent = `${progress}%`;
+        if (completed) completed.textContent = completedCount;
+        if (failed) failed.textContent = failedCount;
+        if (total) total.textContent = totalCount;
+        
+        // Update individual video progress
         const progressGrid = document.getElementById('downloadProgressGrid');
+        if (!progressGrid) return;
+        
         progressGrid.innerHTML = '';
-
-        progressData.items.forEach(item => {
-            const progressItem = document.createElement('div');
-            progressItem.className = `progress-item ${item.status}`;
-            progressItem.innerHTML = `
-                <div class="progress-details">
-                    <div class="progress-title">${item.title}</div>
-                    <div class="progress-status">${item.status}</div>
-                    <div class="progress-bar-item">
-                        <div class="progress-bar-fill" style="width: ${item.progress}%"></div>
+        
+        if (progressData.items && progressData.items.length > 0) {
+            progressData.items.forEach((item, index) => {
+                const progressItem = document.createElement('div');
+                progressItem.className = `progress-item ${item.status || 'pending'}`;
+                
+                const statusText = item.status === 'completed' ? 'Completed' :
+                                  item.status === 'failed' ? 'Failed' :
+                                  item.status === 'already_downloaded' ? 'Already Downloaded' :
+                                  item.status === 'downloading' ? 'Downloading...' :
+                                  item.status === 'checking' ? 'Checking...' : 'Pending';
+                
+                const url = item.title || `Video ${index + 1}`;
+                const shortUrl = url.length > 60 ? url.substring(0, 60) + '...' : url;
+                
+                // Determine color based on status
+                let statusColor = '#2196f3'; // Default blue
+                if (item.status === 'completed') statusColor = '#4caf50'; // Green
+                else if (item.status === 'failed') statusColor = '#f44336'; // Red
+                else if (item.status === 'already_downloaded') statusColor = '#ff9800'; // Orange
+                
+                const message = item.message ? ` - ${item.message}` : '';
+                
+                progressItem.innerHTML = `
+                    <div class="progress-details">
+                        <div class="progress-title" title="${url}">${shortUrl}</div>
+                        <div class="progress-status">${statusText}${message}</div>
+                        <div class="progress-bar-item">
+                            <div class="progress-bar-fill" style="width: ${item.progress || 0}%; background-color: ${statusColor}"></div>
+                        </div>
                     </div>
-                </div>
-                <div class="progress-percentage">${item.progress}%</div>
-            `;
-            progressGrid.appendChild(progressItem);
-        });
+                    <div class="progress-percentage">${item.progress || 0}%</div>
+                `;
+                progressGrid.appendChild(progressItem);
+            });
+        }
     }
 
     async loadVideos() {
@@ -490,6 +862,8 @@ class SocialMediaProcessor {
     }
 
     async trackTranscribeProgress(taskId) {
+        // Also refresh URLs table when transcription starts/completes
+        this.loadUrlsTable();
         const progressSection = document.getElementById('transcribeProgressSection');
         const progressGrid = document.getElementById('transcribeProgressGrid');
         
@@ -533,7 +907,12 @@ class SocialMediaProcessor {
                     
                     this.updateDatabaseStatus('updated');
                     this.updateProcessStatus('transcribe', this.selectedVideos.size);
-                    this.loadVideos(); // Refresh videos list
+                    
+                    // Refresh data with a small delay to ensure DB is updated
+                    setTimeout(() => {
+                        this.loadVideos(); // Refresh videos list
+                        this.loadUrlsTable(); // Refresh URLs table to show updated transcription status
+                    }, 500);
                 }
             } catch (error) {
                 console.error('Progress tracking error:', error);
@@ -809,30 +1188,21 @@ class SocialMediaProcessor {
             const data = await response.json();
             
             if (data.success) {
-                // Add to URL list
-                const urlList = document.getElementById('urlList');
-                const urlItem = document.createElement('div');
-                urlItem.className = 'url-item';
-                urlItem.innerHTML = `
-                    <input type="checkbox" class="url-checkbox" value="${url}">
-                    <div class="url-content">
-                        <div class="url-text">${url}</div>
-                        <div class="url-source">Custom URL</div>
-                    </div>
-                `;
-                
-                urlList.appendChild(urlItem);
+                // Refresh URL list and URLs table to show new URL
+                await this.loadUrls();
+                await this.loadUrlsTable();
                 
                 // Clear input
                 input.value = '';
                 
-                // Add event listener for checkbox
-                const checkbox = urlItem.querySelector('.url-checkbox');
-                checkbox.addEventListener('change', (e) => {
-                    this.toggleUrlSelection(e.target.value, e.target.checked);
-                });
-                
-                this.showToast(`Custom URL added successfully! (${data.added} new, ${data.total} total)`, 'success');
+                // Show success message with details
+                let message = `Custom URL added successfully!`;
+                if (data.db_added !== undefined && data.file_added !== undefined) {
+                    message += ` (DB: ${data.db_added}, File: ${data.file_added}, Total: ${data.total})`;
+                } else {
+                    message += ` (${data.added} new, ${data.total} total)`;
+                }
+                this.showToast(message, 'success');
             } else {
                 this.showToast(data.error || 'Failed to save URL', 'error');
             }
