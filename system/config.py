@@ -24,11 +24,14 @@ class Settings(BaseSettings):
     transcripts_sheet_name: str = Field(default="video_transcripts", description="Google Sheets name for video transcripts")
     
     # AIWaverider Configuration
-    aiwaverider_token: str = Field(default="", description="AIWaverider API token")
+    aiwaverider_token: str = Field(default="", description="AIWaverider API token (optional, will be obtained from login)")
     aiwaverider_upload_url: str = Field(
         default="https://drive-backend.aiwaverider.com/webhook/files/upload",
         description="AIWaverider upload endpoint"
     )
+    aiwaverider_login_url: Optional[str] = Field(default=None, description="AIWaverider login endpoint (auto-derived from upload_url if not set)")
+    aiwaverider_username: str = Field(default="", description="AIWaverider username for authentication")
+    aiwaverider_admin: str = Field(default="", description="AIWaverider admin/password for authentication")
     
     # Legacy environment variable mappings
     aiwaverider_drive_token: str = Field(default="", description="Legacy AIWaverider token field")
@@ -112,6 +115,16 @@ class Settings(BaseSettings):
             self.aiwaverider_token = self.aiwaverider_drive_token
         if not self.aiwaverider_upload_url and self.upload_file_aiwaverider:
             self.aiwaverider_upload_url = self.upload_file_aiwaverider
+        
+        # Debug: Check if .env file exists and log loaded values
+        env_file_path = os.path.join(os.getcwd(), ".env")
+        if os.path.exists(env_file_path):
+            print(f"✅ Found .env file at: {env_file_path}")
+        else:
+            print(f"⚠️ .env file not found at: {env_file_path}")
+        
+        # Debug: Log what was loaded (without showing actual values)
+        print(f"🔍 AIWaverider config loaded - username: {'✓ SET' if self.aiwaverider_username else '✗ NOT SET'}, admin: {'✓ SET' if self.aiwaverider_admin else '✗ NOT SET'}")
 
 # Global settings instance
 settings = Settings()

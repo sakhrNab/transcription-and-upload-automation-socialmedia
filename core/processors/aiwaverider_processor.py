@@ -40,8 +40,14 @@ class AIWaveriderProcessor(BaseProcessor):
         
         # Configuration
         self.upload_url = settings.aiwaverider_upload_url
-        self.token = settings.aiwaverider_token
+        self.username = settings.aiwaverider_username
+        self.admin = settings.aiwaverider_admin
+        self.login_url = settings.aiwaverider_login_url
+        self.token = None  # Will be obtained from login
         self.cache_duration_hours = settings.cache_duration_hours
+        
+        # Debug: Log what we got from settings
+        self.log_step(f"Loaded config - username: {'SET' if self.username else 'NOT SET'}, admin: {'SET' if self.admin else 'NOT SET'}, upload_url: {self.upload_url}")
         
         # Upload paths
         self.video_folder_path = "/videos/instagram/ai.uprise"
@@ -53,6 +59,9 @@ class AIWaveriderProcessor(BaseProcessor):
         # Cache directory
         self.cache_dir = "data/cache"
         os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # Token cache file
+        self.token_cache_file = os.path.join(self.cache_dir, "aiwaverider_token.json")
         
         # Circuit breaker for AIWaverider API
         self.circuit_breaker = CircuitBreaker(
@@ -66,13 +75,19 @@ class AIWaveriderProcessor(BaseProcessor):
         try:
             self.log_step("Initializing AIWaverider processor")
             
-            # Check if token is available
-            if not self.token:
-                self.log_error("AIWaverider token not found in configuration")
+            # Check if username and admin are available
+            if not self.username or not self.admin:
+                self.log_error("AIWaverider username and admin credentials not found in configuration")
                 return False
             
             # Initialize HTTP session with connection pooling
             self._session = self._get_http_session()
+            
+            # Authenticate and get token
+            token_obtained = await self._authenticate()
+            if not token_obtained:
+                self.log_error("Failed to authenticate with AIWaverider")
+                return False
             
             self.initialized = True
             self.status = "ready"
@@ -82,6 +97,177 @@ class AIWaveriderProcessor(BaseProcessor):
         except Exception as e:
             self.log_error("Failed to initialize AIWaverider processor", e)
             return False
+    
+    async def _authenticate(self) -> bool:
+        """Authenticate with AIWaverider and obtain token"""
+        try:
+            # Check if we have a cached token that's still valid
+            cached_token = self._load_cached_token()
+            if cached_token:
+                self.token = cached_token
+                self.log_step("Using cached AIWaverider token")
+                return True
+            
+            # Perform login to get token
+            self.log_step("Authenticating with AIWaverider using username and admin credentials")
+            
+            # Prepare login payload (according to Swagger: LoginRequest with username and password)
+            login_data = {
+                'username': self.username,
+                'password': self.admin  # 'admin' env var contains the password
+            }
+            
+            self.log_step(f"Attempting login with username: {self.username}")
+            
+            # Use configured login URL or use /auth/login from Swagger
+            if self.login_url:
+                login_url = self.login_url
+            else:
+                # Use /auth/login as confirmed from Swagger (no webhook)
+                base_url = self.upload_url.replace('/webhook/files/upload', '')
+                login_url = f"{base_url}/auth/login"
+            
+            self.log_step(f"Using login endpoint: {login_url}")
+            
+            # Try different request formats (405 means method/content-type issue)
+            # Try 1: POST with JSON (most common)
+            # Try 2: POST with form-data
+            # Try 3: GET with query parameters
+            
+            last_error = None
+            
+            # Method 1: POST with JSON
+            try:
+                self.log_step(f"Trying POST with JSON to {login_url}")
+                response = self._session.post(
+                    login_url,
+                    json=login_data,
+                    headers={'Content-Type': 'application/json'},
+                    timeout=30
+                )
+                
+                self.log_step(f"Login response status: {response.status_code}")
+                
+                if response.status_code == 200:
+                    return self._parse_login_response(response, login_url)
+                elif response.status_code == 405:
+                    self.log_step("405 Method Not Allowed - trying form-data instead...")
+                    last_error = f"Status: {response.status_code}, Response: {response.text}"
+                else:
+                    self.log_error(f"Login failed. Status: {response.status_code}, Response: {response.text}")
+                    return False
+            except requests.exceptions.RequestException as e:
+                self.log_error(f"Request exception: {str(e)}")
+                last_error = f"Exception: {str(e)}"
+            
+            # Method 2: POST with form-data (if JSON failed with 405)
+            try:
+                self.log_step(f"Trying POST with form-data to {login_url}")
+                response = self._session.post(
+                    login_url,
+                    data=login_data,  # form-data instead of JSON
+                    timeout=30
+                )
+                
+                self.log_step(f"Login response status: {response.status_code}")
+                
+                if response.status_code == 200:
+                    return self._parse_login_response(response, login_url)
+                else:
+                    self.log_error(f"Login failed with form-data. Status: {response.status_code}, Response: {response.text}")
+                    return False
+            except requests.exceptions.RequestException as e:
+                self.log_error(f"Form-data request exception: {str(e)}")
+                last_error = f"Exception: {str(e)}"
+            
+            # All methods failed
+            self.log_error(f"All login methods failed. Last error: {last_error}")
+            self.log_error(f"Please check Swagger docs for correct HTTP method and request format for /auth/login")
+            return False
+                
+        except Exception as e:
+            self.log_error(f"Error during authentication: {str(e)}")
+            return False
+    
+    def _parse_login_response(self, response, login_url: str) -> bool:
+        """Parse login response and extract token"""
+        try:
+            response_data = response.json()
+            self.log_step(f"Login response data keys: {list(response_data.keys())}")
+            
+            # Extract token from response (according to Swagger: TokenResponse with access_token)
+            self.token = response_data.get('access_token')  # Swagger spec says it's 'access_token'
+            
+            if not self.token:
+                self.log_error(f"Token not found in login response. Response keys: {list(response_data.keys())}, Full response: {response_data}")
+                return False
+            
+            # Cache the token
+            self._save_cached_token(self.token)
+            self.log_step(f"Successfully authenticated with AIWaverider using {login_url}")
+            return True
+        except json.JSONDecodeError as e:
+            self.log_error(f"Failed to parse login response as JSON: {response.text}")
+            return False
+    
+    def _load_cached_token(self) -> Optional[str]:
+        """Load cached token if it exists and is still valid"""
+        try:
+            if os.path.exists(self.token_cache_file):
+                with open(self.token_cache_file, 'r') as f:
+                    cache_data = json.load(f)
+                    token = cache_data.get('token')
+                    timestamp = cache_data.get('timestamp', 0)
+                    
+                    # Check if token is still valid (cache for 1 hour)
+                    if token and (time.time() - timestamp) < 3600:
+                        return token
+        except Exception as e:
+            self.log_step(f"Error loading cached token: {str(e)}")
+        return None
+    
+    def _save_cached_token(self, token: str) -> None:
+        """Save token to cache"""
+        try:
+            cache_data = {
+                'token': token,
+                'timestamp': time.time()
+            }
+            with open(self.token_cache_file, 'w') as f:
+                json.dump(cache_data, f)
+        except Exception as e:
+            self.log_step(f"Error saving cached token: {str(e)}")
+    
+    async def _ensure_authenticated(self) -> bool:
+        """Ensure we have a valid token, re-authenticate if needed"""
+        # Check if username and admin are configured
+        if not self.username or not self.admin:
+            self.log_error("AIWaverider username and admin credentials not found in configuration. Please add AIWAVERIDER_USERNAME and AIWAVERIDER_ADMIN to your .env file")
+            return False
+        
+        # Initialize session if not already done
+        if not self._session:
+            self._session = self._get_http_session()
+        
+        # Authenticate if we don't have a token
+        if not self.token:
+            self.log_step("No token found, authenticating with AIWaverider...")
+            return await self._authenticate()
+        
+        return True
+    
+    def _handle_auth_error(self, response) -> bool:
+        """Handle authentication errors (401/403) by clearing cache and returning False"""
+        if response.status_code in [401, 403]:
+            self.log_step("Authentication failed, clearing cached token")
+            try:
+                if os.path.exists(self.token_cache_file):
+                    os.remove(self.token_cache_file)
+            except Exception as e:
+                self.log_step(f"Error clearing token cache: {str(e)}")
+            self.token = None
+            return False
+        return True
     
     def _get_http_session(self):
         """Get HTTP session with connection pooling and retry strategy"""
@@ -273,6 +459,25 @@ class AIWaveriderProcessor(BaseProcessor):
                 filenames = {file_info.get('name') for file_info in files if file_info.get('name')}
                 self.log_step(f"Found {len(filenames)} files in AIWaverider Drive folder: {folder_path}")
                 return filenames
+            elif response.status_code in [401, 403]:
+                # Token expired, try to re-authenticate
+                self.log_step("Token expired, attempting to re-authenticate")
+                if await self._authenticate():
+                    # Retry the request with new token
+                    headers = {'Authorization': f'Bearer {self.token}'}
+                    response = self._session.get(
+                        list_url,
+                        headers=headers,
+                        params=params,
+                        timeout=30
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        files = data.get('files', [])
+                        filenames = {file_info.get('name') for file_info in files if file_info.get('name')}
+                        return filenames
+                self.log_error(f"Failed to get file list after re-authentication. Status: {response.status_code}, Response: {response.text}")
+                return set()
             else:
                 self.log_error(f"Failed to get file list. Status: {response.status_code}, Response: {response.text}")
                 return set()
@@ -284,8 +489,9 @@ class AIWaveriderProcessor(BaseProcessor):
     async def _check_file_exists_on_aiwaverider(self, filename: str, folder_path: str) -> bool:
         """Check if file already exists on AIWaverider Drive"""
         try:
-            if not self.token:
-                self.log_error("AIWaverider token not found")
+            # Ensure we have a valid token
+            if not await self._ensure_authenticated():
+                self.log_error("AIWaverider authentication failed")
                 return False
             
             # Get existing files for the folder
@@ -414,8 +620,9 @@ class AIWaveriderProcessor(BaseProcessor):
     async def _perform_upload(self, file_path: str, folder_path: str, file_type: str) -> bool:
         """Perform the actual upload operation (called by circuit breaker)"""
         try:
-            if not self.token:
-                self.log_error("AIWaverider token not found")
+            # Ensure we have a valid token
+            if not await self._ensure_authenticated():
+                self.log_error("AIWaverider authentication failed")
                 return False
                 
             if not os.path.exists(file_path):
@@ -505,8 +712,8 @@ class AIWaveriderProcessor(BaseProcessor):
             self.log_step(f"Total chunks: {total_chunks}")
             self.log_step(f"Upload ID: {upload_id}")
             
-            # Step 1: Upload file chunks
-            if not self._upload_file_chunks(file_path, upload_id, chunk_size, total_chunks):
+            # Step 1: Upload file chunks (pass folder_path)
+            if not self._upload_file_chunks(file_path, upload_id, chunk_size, total_chunks, folder_path):
                 self.log_error(f"Failed to upload chunks for {filename}")
                 return False
             
@@ -522,14 +729,14 @@ class AIWaveriderProcessor(BaseProcessor):
             self.log_error(f"Error uploading large {file_type} to AIWaverider Drive: {str(e)}")
             return False
     
-    def _upload_file_chunks(self, file_path: str, upload_id: str, chunk_size: int, total_chunks: int) -> bool:
-        """Upload file in chunks to the chunked upload endpoint"""
+    def _upload_file_chunks(self, file_path: str, upload_id: str, chunk_size: int, total_chunks: int, folder_path: str = "") -> bool:
+        """Upload file in chunks to the chunked upload endpoint (according to Swagger spec)"""
         try:
             headers = {
                 'Authorization': f'Bearer {self.token}'
             }
             
-            # Get the chunked upload URL
+            # Get the chunked upload URL (webhook endpoint)
             chunked_upload_url = self.upload_url.replace('/webhook/files/upload', '/webhook/files/upload-chunk')
             
             with open(file_path, 'rb') as file:
@@ -541,14 +748,16 @@ class AIWaveriderProcessor(BaseProcessor):
                     
                     self.log_step(f"Uploading chunk {chunk_number}/{total_chunks} for upload_id: {upload_id}")
                     
-                    # Prepare chunk upload data
+                    # Prepare chunk upload data (according to Swagger: multipart/form-data)
+                    # Swagger spec: file (binary), upload_id (string), chunk_number (integer), total_chunks (integer), folder_path (string, optional)
                     files = {
                         'file': (f'chunk_{chunk_number}', chunk_data, 'application/octet-stream')
                     }
                     data = {
                         'upload_id': upload_id,
-                        'chunk_number': str(chunk_number),
-                        'total_chunks': str(total_chunks)
+                        'chunk_number': chunk_number,  # INTEGER, not string (per Swagger spec)
+                        'total_chunks': total_chunks,  # INTEGER, not string (per Swagger spec)
+                        'folder_path': folder_path  # Include folder_path (optional but should be sent)
                     }
                     
                     # Upload chunk

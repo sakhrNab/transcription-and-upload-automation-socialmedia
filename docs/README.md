@@ -399,8 +399,11 @@ VIDEO_TRANSCRIPTS_ID=your_transcripts_sheet_id
 VIDEO_TRANSCRIPTS_NAME=video_transcripts
 
 # AIWaverider Configuration
-AIWAVERIDER_TOKEN=your_aiwaverider_token
+AIWAVERIDER_USERNAME=your_username
+AIWAVERIDER_ADMIN=your_admin_password
 AIWAVERIDER_UPLOAD_URL=https://drive-backend.aiwaverider.com/webhook/files/upload
+# Optional: Custom login endpoint (defaults to /auth/login if not set)
+# AIWAVERIDER_LOGIN_URL=https://drive-backend.aiwaverider.com/auth/login
 
 # OpenAI Configuration (for smart naming)
 OPENAI_API_KEY=your_openai_api_key
