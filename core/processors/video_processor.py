@@ -36,6 +36,13 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+class AlreadyDownloadedException(Exception):
+    """Exception raised when video is already downloaded"""
+    def __init__(self, message: str, file_path: str = None, video_data: dict = None):
+        super().__init__(message)
+        self.file_path = file_path
+        self.video_data = video_data
+
 class VideoProcessor(BaseProcessor):
     """Handles video processing and transcription with real logic"""
     
@@ -339,8 +346,24 @@ class VideoProcessor(BaseProcessor):
         """Download video using yt_dlp and extract comprehensive metadata"""
         self.log_step(f"Extracting video information for video {index}")
         
+        # Check if this is a YouTube URL
+        is_youtube = 'youtube.com' in url or 'youtu.be' in url
+        
         # First, extract info without downloading
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+        # Use YouTube-specific options if needed (per instructions: use ios client for better compatibility)
+        if is_youtube:
+            info_opts = {
+                'quiet': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['ios', 'web'],  # Use ios client first (no token needed), fallback to web
+                    }
+                },
+            }
+        else:
+            info_opts = {'quiet': True}
+        
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
             try:
                 info = ydl.extract_info(url, download=False)
                 self.log_step(f"Extracted metadata for {info.get('title', 'Unknown')}")
@@ -378,23 +401,83 @@ class VideoProcessor(BaseProcessor):
         self.log_step(f"Download directory: {abs_video_output_dir}")
         
         # Download configuration - use absolute path
-        ydl_opts = {
-            'outtmpl': filename_template,
-            'format': 'best[ext=mp4]/best',
-            'writesubtitles': False,
-            'writeautomaticsub': False,
-            'ignoreerrors': False,
-            'quiet': True
-        }
+        # Per instructions: yt-dlp -f mp4 for video downloads
+        # In Python API: 'format': 'mp4' or 'best[ext=mp4]/best' with fallback
+        if is_youtube:
+            # YouTube-specific: Use format selector matching instructions (-f mp4)
+            # With fallbacks for when mp4 isn't available
+            ydl_opts = {
+                'outtmpl': filename_template,
+                'format': 'mp4/best[ext=mp4]/best',  # Try mp4 first (per instructions), then fallback
+                'writesubtitles': False,
+                'writeautomaticsub': False,
+                'ignoreerrors': True,  # Continue even if some formats fail
+                'quiet': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['ios', 'web'],  # Use ios client (no token needed), fallback to web
+                    }
+                },
+                'retries': 3,
+                'fragment_retries': 3,
+            }
+        else:
+            # Standard options for other platforms
+            ydl_opts = {
+                'outtmpl': filename_template,
+                'format': 'best[ext=mp4]/best',
+                'writesubtitles': False,
+                'writeautomaticsub': False,
+                'ignoreerrors': False,
+                'quiet': True
+            }
         
         download_start = time.time()
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            # prepare_filename might return relative path, convert to absolute
-            downloaded_file = ydl.prepare_filename(info)
-            # Ensure it's an absolute path
-            if not os.path.isabs(downloaded_file):
-                downloaded_file = os.path.join(abs_video_output_dir, os.path.basename(downloaded_file))
+        
+        # Try download with format selector, fallback if format not available
+        download_success = False
+        downloaded_file = None
+        
+        if is_youtube:
+            # Try multiple format selectors in order (matching the instructions approach)
+            format_selectors = [
+                'mp4',  # Direct mp4 format (matches instructions: -f mp4)
+                'best[ext=mp4]/best',  # Best mp4, fallback to best
+                'best',  # Any best format
+            ]
+            
+            for format_selector in format_selectors:
+                try:
+                    ydl_opts['format'] = format_selector
+                    self.log_step(f"Trying download with format: {format_selector} (matching instructions: yt-dlp -f mp4)")
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([url])
+                        # Get the downloaded file path from the successful download
+                        downloaded_file = ydl.prepare_filename(info)
+                        download_success = True
+                        break  # Success, exit loop
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'format is not available' in error_msg or 'Requested format' in error_msg:
+                        self.log_step(f"Format '{format_selector}' not available, trying next option...")
+                        continue
+                    else:
+                        # Different error, re-raise it
+                        raise
+            
+            if not download_success:
+                raise Exception("Failed to download video with any format selector")
+        else:
+            # Non-YouTube: use standard download
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+                # Get the downloaded file path
+                downloaded_file = ydl.prepare_filename(info)
+                download_success = True
+        
+        # Ensure it's an absolute path
+        if downloaded_file and not os.path.isabs(downloaded_file):
+            downloaded_file = os.path.join(abs_video_output_dir, os.path.basename(downloaded_file))
         
         download_time = time.time() - download_start
         
@@ -997,11 +1080,200 @@ TRANSCRIPT:
         except Exception as e:
             self.log_error(f"Error updating video transcription: {str(e)}")
     
+    def _clean_vtt_transcript(self, vtt_text: str) -> str:
+        """Clean VTT transcript by removing timestamps and XML tags
+        Example: 'Hello <00:00:00.377><c>everyone, </c><00:00:00.754><c>today </c>'
+        Returns: 'Hello everyone, today'
+        
+        Handles:
+        - Timestamps: <00:00:00.377>, <00:00:01.131>
+        - XML tags: <c>, </c>, <v>, </v>, etc.
+        - Any other XML-like tags"""
+        import re
+        if not vtt_text:
+            return ''
+        
+        # Remove timestamp patterns like <00:00:00.377> or <00:00:01.131>
+        # Pattern matches: <HH:MM:SS.mmm> where HH can be 00-99
+        clean = re.sub(r'<\d{1,2}:\d{2}:\d{2}\.\d{3}>', '', vtt_text)
+        
+        # Remove XML tags like <c>, </c>, <v>, </v>, <i>, </i>, etc.
+        # This handles both opening and closing tags
+        clean = re.sub(r'</?[a-z]+[^>]*>', '', clean)
+        
+        # Clean up extra spaces (multiple spaces, tabs, newlines)
+        clean = re.sub(r'\s+', ' ', clean)
+        
+        # Strip leading/trailing whitespace
+        clean = clean.strip()
+        
+        return clean
+    
+    async def _extract_youtube_transcript_only(self, url: str, index: int) -> tuple[dict, str, str, str]:
+        """Extract YouTube transcript directly without downloading video
+        Returns: (metadata dict, transcript_text, transcript_file_path, clean_transcript)"""
+        self.log_step(f"Extracting YouTube transcript only (no video download) for video {index}")
+        
+        video_id = self._extract_video_id(url)
+        
+        # Create output directory for transcripts
+        abs_transcripts_dir = os.path.abspath(self.transcripts_dir)
+        os.makedirs(abs_transcripts_dir, exist_ok=True)
+        
+        # Configure for subtitle extraction only (same options for both info and download)
+        # This matches the working test script approach
+        transcript_opts = {
+            'quiet': True,
+            'noplaylist': True,  # Extract only single video, not playlist
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': ['en', 'en-US', 'en-GB'],
+            'subtitlesformat': 'vtt',
+            'skip_download': True,  # Don't download video
+            'ignoreerrors': True,  # Continue even if format extraction fails
+            'outtmpl': os.path.join(abs_transcripts_dir, f"{video_id}.%(ext)s"),
+        }
+        
+        transcript_text = ''
+        transcript_file_path = ''
+        info = None
+        metadata = {}
+        
+        try:
+            with yt_dlp.YoutubeDL(transcript_opts) as ydl:
+                # Step 1: Extract video info (using same options as download)
+                # This ensures we don't trigger format validation
+                self.log_step(f"Extracting video metadata...")
+                try:
+                    info = ydl.extract_info(url, download=False)
+                except Exception as e:
+                    error_msg = str(e)
+                    # If format error, try to continue - we only need transcripts
+                    if 'format is not available' in error_msg or 'Requested format' in error_msg:
+                        self.log_step(f"Format warning during info extraction (expected for transcript-only)")
+                        # Try to get info anyway - sometimes it still works
+                        try:
+                            # Try with even more permissive options
+                            minimal_opts = {
+                                'quiet': True,
+                                'noplaylist': True,
+                                'skip_download': True,
+                                'ignoreerrors': True,
+                            }
+                            with yt_dlp.YoutubeDL(minimal_opts) as ydl2:
+                                info = ydl2.extract_info(url, download=False)
+                        except:
+                            pass
+                    else:
+                        raise  # Re-raise if it's a different error
+                
+                if not info:
+                    raise Exception("Failed to extract video info - video may be restricted or unavailable")
+                
+                # Handle playlist results - extract first video if it's a playlist
+                if info.get('_type') == 'playlist':
+                    entries = info.get('entries', [])
+                    if entries:
+                        info = entries[0]  # Use first video from playlist
+                        self.log_step(f"Extracted first video from playlist: {info.get('title', 'Unknown')}")
+                    else:
+                        raise Exception("Playlist has no available videos")
+                
+                # Extract metadata from info
+                metadata = self._extract_comprehensive_metadata(info, '')  # No file path needed
+                self.log_step(f"Metadata extracted: {metadata.get('title', 'Unknown')}")
+                
+                # Step 2: Download transcript
+                self.log_step(f"Downloading transcript...")
+                try:
+                    ydl.download([url])
+                except Exception as download_error:
+                    error_msg = str(download_error)
+                    # If it's a format error but we're only getting transcripts, try to continue
+                    if 'format is not available' in error_msg or 'Requested format' in error_msg:
+                        self.log_step(f"Format warning during download (expected for transcript-only)")
+                        # Continue - transcript might still be available
+                    else:
+                        # Log but don't fail completely
+                        self.log_error(f"Download error: {error_msg[:200]}")
+                
+                # Find the downloaded transcript file (yt-dlp adds language code: video_id.en.vtt)
+                for file in os.listdir(abs_transcripts_dir):
+                    if file.startswith(video_id) and file.endswith(('.vtt', '.srt', '.ttml')):
+                        transcript_file_path = os.path.join(abs_transcripts_dir, file)
+                        break
+                
+                if transcript_file_path and os.path.exists(transcript_file_path):
+                    # Read and convert VTT to plain text
+                    with open(transcript_file_path, 'r', encoding='utf-8') as f:
+                        vtt_content = f.read()
+                    
+                    # Extract text from VTT (remove timestamps and formatting)
+                    lines = vtt_content.split('\n')
+                    text_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        # Skip WebVTT headers, timestamps, and empty lines
+                        if (line and 
+                            not line.startswith('WEBVTT') and 
+                            '-->' not in line and 
+                            not line.startswith('Kind:') and 
+                            not line.startswith('Language:') and
+                            not line.startswith('NOTE:')):
+                            text_lines.append(line)
+                    
+                    transcript_text = ' '.join(text_lines)
+                    self.log_step(f"Transcript extracted: {len(transcript_text)} characters, {len(transcript_text.split())} words")
+                else:
+                    # Check if transcript is available in the info but wasn't downloaded
+                    subtitles = info.get('subtitles', {}) if info else {}
+                    auto_captions = info.get('automatic_captions', {}) if info else {}
+                    if subtitles or auto_captions:
+                        self.log_step(f"Warning: Transcript file not found, but transcripts are available in video info")
+                        self.log_step(f"Note: Video may have format restrictions preventing transcript download")
+                    else:
+                        self.log_step(f"Warning: No transcripts available for this video")
+                    
+        except Exception as e:
+            error_msg = str(e)
+            self.log_error(f"Error in transcript extraction: {error_msg}")
+            # If we have metadata, continue with that
+            if not metadata and info:
+                try:
+                    metadata = self._extract_comprehensive_metadata(info, '')
+                except:
+                    pass
+        
+        # Ensure we have at least basic metadata
+        if not metadata:
+            # Create minimal metadata from video_id
+            metadata = {
+                'video_id': video_id,
+                'title': f"YouTube Video {video_id}",
+                'description': '',
+                'platform': 'youtube',
+            }
+        
+        # Create clean transcript (remove timestamps and XML tags)
+        clean_transcript = ''
+        if transcript_text:
+            clean_transcript = self._clean_vtt_transcript(transcript_text)
+            self.log_step(f"Clean transcript created: {len(clean_transcript)} characters, {len(clean_transcript.split())} words")
+        
+        return metadata, transcript_text, transcript_file_path, clean_transcript
+    
     async def download_video_only(self, url: str, index: int) -> bool:
         """Download video and extract metadata only (no transcription, no upload)
+        For YouTube: Extract transcript directly without downloading video
         Returns True if downloaded, False if failed, or raises AlreadyDownloadedException if already exists"""
         try:
-            self.log_step(f"DOWNLOAD ONLY: Starting download-only processing for video {index} (NO transcription, NO upload)")
+            # Check if this is a YouTube URL
+            is_youtube = 'youtube.com' in url or 'youtu.be' in url
+            
+            if is_youtube:
+                self.log_step(f"YOUTUBE DETECTED: Using transcript-only extraction (no video download) for video {index}")
+            else:
+                self.log_step(f"DOWNLOAD ONLY: Starting download-only processing for video {index} (NO transcription, NO upload)")
             
             # Check if video is already downloaded BEFORE attempting download
             video_id = self._extract_video_id(url)
@@ -1015,11 +1287,22 @@ TRANSCRIPT:
                         cursor = await conn.execute("PRAGMA table_info(video_transcripts)")
                         columns = [col[1] for col in await cursor.fetchall()]
                         existing_video_by_url = dict(zip(columns, row))
-                        file_path = existing_video_by_url.get('file_path', '')
-                        if file_path and os.path.exists(file_path):
-                            self.log_step(f"SKIP: Video already downloaded (found in database by URL): {url}")
-                            self.log_step(f"Existing file: {file_path}")
-                            raise AlreadyDownloadedException(f"Video already downloaded: {url}", file_path, existing_video_by_url)
+                        
+                        # For YouTube: check if transcript exists
+                        # For others: check if video file exists
+                        if is_youtube:
+                            transcript_path = existing_video_by_url.get('transcript_file_path', '')
+                            transcription_status = existing_video_by_url.get('transcription_status', '')
+                            if (transcript_path and os.path.exists(transcript_path)) or transcription_status == 'COMPLETED':
+                                self.log_step(f"SKIP: YouTube transcript already extracted (found in database by URL): {url}")
+                                self.log_step(f"Existing transcript: {transcript_path if transcript_path else 'Status: COMPLETED'}")
+                                raise AlreadyDownloadedException(f"YouTube transcript already extracted: {url}", transcript_path, existing_video_by_url)
+                        else:
+                            file_path = existing_video_by_url.get('file_path', '')
+                            if file_path and os.path.exists(file_path):
+                                self.log_step(f"SKIP: Video already downloaded (found in database by URL): {url}")
+                                self.log_step(f"Existing file: {file_path}")
+                                raise AlreadyDownloadedException(f"Video already downloaded: {url}", file_path, existing_video_by_url)
             except AlreadyDownloadedException:
                 raise
             except Exception as e:
@@ -1029,26 +1312,60 @@ TRANSCRIPT:
             if video_id:
                 existing_video_by_id = await db_manager.get_video_transcript_by_id(video_id)
                 if existing_video_by_id:
-                    file_path = existing_video_by_id.get('file_path', '')
-                    if file_path and os.path.exists(file_path):
-                        self.log_step(f"SKIP: Video already downloaded (found in database by video_id): {video_id}")
-                        self.log_step(f"Existing file: {file_path}")
-                        raise AlreadyDownloadedException(f"Video already downloaded (ID: {video_id})", file_path, existing_video_by_id)
+                    # For YouTube: check if transcript exists (transcript_file_path or transcription_status is COMPLETED)
+                    # For others: check if video file exists
+                    if is_youtube:
+                        transcript_path = existing_video_by_id.get('transcript_file_path', '')
+                        transcription_status = existing_video_by_id.get('transcription_status', '')
+                        if (transcript_path and os.path.exists(transcript_path)) or transcription_status == 'COMPLETED':
+                            self.log_step(f"SKIP: YouTube transcript already extracted (found in database by video_id): {video_id}")
+                            self.log_step(f"Existing transcript: {transcript_path if transcript_path else 'Status: COMPLETED'}")
+                            raise AlreadyDownloadedException(f"YouTube transcript already extracted (ID: {video_id})", transcript_path, existing_video_by_id)
+                    else:
+                        file_path = existing_video_by_id.get('file_path', '')
+                        if file_path and os.path.exists(file_path):
+                            self.log_step(f"SKIP: Video already downloaded (found in database by video_id): {video_id}")
+                            self.log_step(f"Existing file: {file_path}")
+                            raise AlreadyDownloadedException(f"Video already downloaded (ID: {video_id})", file_path, existing_video_by_id)
             
-            # Check 3: Check file system for video file
-            if video_id and os.path.exists(self.video_output_dir):
-                for file in os.listdir(self.video_output_dir):
-                    if video_id in file and file.endswith(('.mp4', '.webm', '.mkv')):
-                        full_path = os.path.join(self.video_output_dir, file)
-                        if os.path.exists(full_path):
-                            self.log_step(f"SKIP: Video file already exists on disk: {file}")
-                            self.log_step(f"Existing file: {full_path}")
-                            # Try to get metadata from database or extract from file
-                            existing_video = await db_manager.get_video_transcript_by_id(video_id)
-                            raise AlreadyDownloadedException(f"Video file already exists: {file}", full_path, existing_video)
+            # Check 3: Check file system
+            if is_youtube:
+                # For YouTube: Check transcripts directory for existing transcript files
+                if video_id and os.path.exists(self.transcripts_dir):
+                    for file in os.listdir(self.transcripts_dir):
+                        if video_id in file and file.endswith(('.vtt', '.srt', '.ttml')):
+                            full_path = os.path.join(self.transcripts_dir, file)
+                            if os.path.exists(full_path):
+                                self.log_step(f"SKIP: YouTube transcript file already exists on disk: {file}")
+                                self.log_step(f"Existing transcript: {full_path}")
+                                # Try to get metadata from database
+                                existing_video = await db_manager.get_video_transcript_by_id(video_id)
+                                raise AlreadyDownloadedException(f"YouTube transcript file already exists: {file}", full_path, existing_video)
+            else:
+                # For other platforms: Check video output directory for video files
+                if video_id and os.path.exists(self.video_output_dir):
+                    for file in os.listdir(self.video_output_dir):
+                        if video_id in file and file.endswith(('.mp4', '.webm', '.mkv')):
+                            full_path = os.path.join(self.video_output_dir, file)
+                            if os.path.exists(full_path):
+                                self.log_step(f"SKIP: Video file already exists on disk: {file}")
+                                self.log_step(f"Existing file: {full_path}")
+                                # Try to get metadata from database or extract from file
+                                existing_video = await db_manager.get_video_transcript_by_id(video_id)
+                                raise AlreadyDownloadedException(f"Video file already exists: {file}", full_path, existing_video)
             
-            # Step 1: Download video and extract metadata
-            video_path, metadata, raw_info = await self._download_video_and_metadata(url, index)
+            # Step 1: For YouTube, extract transcript only. For others, download video
+            if is_youtube:
+                # YouTube: Extract transcript directly (no video download)
+                metadata, transcript_text, transcript_file_path, clean_transcript = await self._extract_youtube_transcript_only(url, index)
+                video_path = ''  # No video file for YouTube transcript-only mode
+                raw_info = None
+            else:
+                # Other platforms: Download video and extract metadata
+                video_path, metadata, raw_info = await self._download_video_and_metadata(url, index)
+                transcript_text = ''  # Empty for non-YouTube (will be transcribed later)
+                transcript_file_path = ''
+                clean_transcript = ''  # Empty for non-YouTube
             
             # Step 2: Download thumbnail
             thumbnail_path = await self._download_thumbnail(
@@ -1071,15 +1388,47 @@ TRANSCRIPT:
                 index
             )
             
-            # Step 4: Save to database (without transcription data)
+            # Step 4: Save to database
             # Ensure all paths are absolute before saving to database
             abs_video_path = os.path.abspath(video_path) if video_path else ''
             abs_thumbnail_path = os.path.abspath(thumbnail_path) if thumbnail_path else ''
+            abs_transcript_path = os.path.abspath(transcript_file_path) if transcript_file_path else ''
+            
+            # For YouTube transcript-only: mark as COMPLETED with transcript
+            # For other platforms: mark as PENDING (will be transcribed later)
+            if is_youtube and transcript_text:
+                transcription_status = 'COMPLETED'
+                transcript_word_count = len(transcript_text.split())
+                notes = 'YouTube transcript extracted (no video download)'
+            else:
+                transcription_status = 'PENDING'
+                transcript_word_count = 0
+                notes = 'Downloaded only - transcription pending'
+            
+            # Determine filename (for YouTube, use transcript filename; for others, use video filename)
+            if is_youtube:
+                filename = os.path.basename(abs_transcript_path) if abs_transcript_path else f"{video_id}_transcript.vtt"
+            else:
+                filename = os.path.basename(abs_video_path) if abs_video_path else f"{video_id}.mp4"
+            
+            # Calculate file size in MB (for non-YouTube: from metadata or actual file; for YouTube: 0)
+            if is_youtube:
+                video_file_size_mb = 0  # No video file for YouTube transcript-only
+            else:
+                # Try to get from metadata first (filesize is in bytes)
+                filesize_bytes = metadata.get('filesize', 0)
+                if filesize_bytes > 0:
+                    video_file_size_mb = filesize_bytes / (1024 * 1024)  # Convert bytes to MB
+                elif abs_video_path and os.path.exists(abs_video_path):
+                    # Fallback: calculate from actual file
+                    video_file_size_mb = os.path.getsize(abs_video_path) / (1024 * 1024)
+                else:
+                    video_file_size_mb = 0
             
             video_data = {
                 'video_id': metadata.get('video_id', ''),
-                'filename': os.path.basename(abs_video_path),
-                'file_path': abs_video_path,
+                'filename': filename,
+                'file_path': abs_video_path,  # Empty for YouTube transcript-only, actual path for others
                 'url': url,
                 'title': metadata.get('title', ''),
                 'description': metadata.get('description', ''),
@@ -1100,24 +1449,68 @@ TRANSCRIPT:
                 'thumbnail_url': metadata.get('thumbnail_url', ''),
                 'webpage_url': metadata.get('webpage_url', ''),
                 'extractor': metadata.get('extractor', ''),
-                'transcription_text': '',  # Empty for download-only
-                'transcription_status': 'PENDING',  # Will be processed later
+                'transcription_text': transcript_text,  # For YouTube: transcript text (may contain timestamps/tags); for others: empty
+                'transcription_status': transcription_status,  # COMPLETED for YouTube with transcript, PENDING for others
                 'smart_name': generated_name,
                 'thumbnail_file_path': abs_thumbnail_path if abs_thumbnail_path else '',
-                'video_file_size_mb': metadata.get('file_size_mb', 0),
-                'transcript_word_count': 0,  # Will be filled during transcription
-                'processing_time_seconds': 0,  # Will be filled during transcription
-                'notes': 'Downloaded only - transcription pending',
+                'transcript_file_path': abs_transcript_path if abs_transcript_path else '',  # YouTube: transcript file path; others: empty
+                'clean_transcript': clean_transcript if is_youtube and clean_transcript else '',  # YouTube: clean transcript without timestamps/tags; others: empty
+                'video_file_size_mb': video_file_size_mb,  # Calculated above
+                'transcript_word_count': transcript_word_count,
+                'processing_time_seconds': 0,
+                'notes': notes,
                 'error_details': ''
             }
             
-            # Debug: Log the thumbnail path being saved
+            # Debug: Log the data being saved (especially for YouTube)
+            self.log_step(f"=== SAVING TO DATABASE ===")
+            if is_youtube:
+                self.log_step(f"YouTube video detected - transcript available: {bool(transcript_text)}")
+                if transcript_text:
+                    self.log_step(f"  - transcription_text length: {len(transcript_text)} characters")
+                    self.log_step(f"  - transcript_file_path: {abs_transcript_path}")
+                    self.log_step(f"  - transcription_status: {transcription_status}")
+                    self.log_step(f"  - transcript_word_count: {transcript_word_count}")
+                else:
+                    self.log_error(f"  - WARNING: transcript_text is EMPTY for YouTube video!")
             self.log_step(f"Saving thumbnail path to database: {video_data.get('thumbnail_file_path', 'EMPTY')}")
+            self.log_step(f"video_data keys: {list(video_data.keys())}")
+            self.log_step(f"transcription_text in video_data: {'transcription_text' in video_data}")
+            self.log_step(f"transcript_file_path in video_data: {'transcript_file_path' in video_data}")
             
             # Save to database
+            self.log_step(f"Calling upsert_video_transcript with video_data...")
             success = await db_manager.upsert_video_transcript(video_data)
             if success:
-                self.log_step(f"Video {index} data saved to database")
+                self.log_step(f"✅ Video {index} data saved to database successfully")
+                
+                # Verify what was actually saved (for YouTube)
+                if is_youtube:
+                    self.log_step(f"=== VERIFYING SAVED DATA (YouTube) ===")
+                    try:
+                        saved_video = await db_manager.get_video_transcript_by_index(index)
+                        if saved_video:
+                            saved_text = saved_video.get('transcription_text', '')
+                            saved_path = saved_video.get('transcript_file_path', '')
+                            saved_status = saved_video.get('transcription_status', '')
+                            saved_platform = saved_video.get('platform', '')
+                            self.log_step(f"Retrieved saved video from database:")
+                            self.log_step(f"  - platform: {saved_platform}")
+                            self.log_step(f"  - transcription_status: {saved_status}")
+                            self.log_step(f"  - transcription_text length: {len(saved_text)} characters")
+                            self.log_step(f"  - transcript_file_path: {saved_path}")
+                            if not saved_text:
+                                self.log_error(f"  - ❌ ERROR: transcription_text is EMPTY in database!")
+                            if not saved_path:
+                                self.log_error(f"  - ❌ ERROR: transcript_file_path is EMPTY in database!")
+                            if saved_status != 'COMPLETED':
+                                self.log_error(f"  - ❌ ERROR: transcription_status is '{saved_status}', expected 'COMPLETED'!")
+                        else:
+                            self.log_error(f"❌ Could not retrieve saved video data for verification")
+                    except Exception as e:
+                        self.log_error(f"❌ Error verifying saved data: {str(e)}")
+                        import traceback
+                        self.log_error(f"Traceback: {traceback.format_exc()}")
                 
                 # Update URL status in urls table
                 video_id = metadata.get('video_id', '')
@@ -1165,17 +1558,30 @@ TRANSCRIPT:
                         self.log_error(f"Failed to update URL status for: {url}")
                 
                 self.processed_count += 1
-                # Convert to absolute path for clarity
-                abs_video_path = os.path.abspath(video_path)
-                self.log_step(f"DOWNLOAD ONLY: Video {index} downloaded successfully (NO transcription, NO upload performed)")
-                self.log_step(f"Downloaded file location: {abs_video_path}")
-                print(f"\n{'='*60}")
-                print(f"DOWNLOAD COMPLETE: Video {index}")
-                print(f"File saved to: {abs_video_path}")
-                print(f"{'='*60}\n")
+                
+                if is_youtube and transcript_text:
+                    # YouTube transcript-only mode
+                    self.log_step(f"YOUTUBE TRANSCRIPT: Video {index} processed successfully (transcript extracted, no video download)")
+                    self.log_step(f"Transcript file: {abs_transcript_path}")
+                    self.log_step(f"Transcript length: {len(transcript_text)} characters, {transcript_word_count} words")
+                    print(f"\n{'='*60}")
+                    print(f"YOUTUBE TRANSCRIPT COMPLETE: Video {index}")
+                    print(f"Title: {metadata.get('title', 'Unknown')}")
+                    print(f"Transcript saved to: {abs_transcript_path}")
+                    print(f"Transcript: {transcript_word_count} words")
+                    print(f"{'='*60}\n")
+                else:
+                    # Regular download mode
+                    abs_video_path = os.path.abspath(video_path) if video_path else ''
+                    self.log_step(f"DOWNLOAD ONLY: Video {index} downloaded successfully (NO transcription, NO upload performed)")
+                    self.log_step(f"Downloaded file location: {abs_video_path}")
+                    print(f"\n{'='*60}")
+                    print(f"DOWNLOAD COMPLETE: Video {index}")
+                    print(f"File saved to: {abs_video_path}")
+                    print(f"{'='*60}\n")
                 return True
             else:
-                self.log_error(f"Failed to save video {index} data to database")
+                self.log_error(f"❌ Failed to save video {index} data to database")
                 # Update URL status to FAILED
                 from datetime import datetime
                 await db_manager.update_url_status(

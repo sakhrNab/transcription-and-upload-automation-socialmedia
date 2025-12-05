@@ -80,7 +80,8 @@ class SheetsProcessor(BaseProcessor):
             'upload_status_thumbnail',
             'thumbnail_image',
             'transcription_status',
-            'transcript'
+            'transcript',
+            'clean_transcript'  # Clean transcript without timestamps/XML tags (YouTube only)
         ]
     
     async def initialize(self) -> bool:
@@ -360,7 +361,8 @@ class SheetsProcessor(BaseProcessor):
                     'upload_status_thumbnail': self.STATUS_UPLOADED if matching_thumbnail and matching_thumbnail.get('drive_id') else self.STATUS_PENDING,
                     'thumbnail_image': '',  # Will be populated after image upload
                     'transcription_status': video.get('transcription_status', 'PENDING'),
-                    'transcript': video.get('transcription_text', '')
+                    'transcript': video.get('transcription_text', ''),
+                    'clean_transcript': video.get('clean_transcript', '')  # Clean transcript without timestamps/XML tags
                 }
                 content_list.append(content_info)
             
@@ -587,7 +589,9 @@ class SheetsProcessor(BaseProcessor):
             self.log_error(f"Error adding new entries to sheet", e)
     
     async def update_sheets_after_download(self, video_index: int) -> bool:
-        """Update sheets after download-only processing"""
+        """Update sheets after download-only processing
+        For YouTube: Includes transcript if available (transcript-only extraction)
+        For others: Empty transcript (will be transcribed later)"""
         try:
             self.log_step(f"Updating sheets for video {video_index}")
             
@@ -597,34 +601,60 @@ class SheetsProcessor(BaseProcessor):
                 self.log_error(f"Video data not found for index {video_index}")
                 return False
             
-            # Prepare content info for sheets
+            # Debug logging for YouTube videos
+            platform = video_data.get('platform', '').lower()
+            if platform == 'youtube':
+                self.log_step(f"DEBUG: YouTube video detected for sheets update")
+                self.log_step(f"  - transcription_status: {video_data.get('transcription_status', 'MISSING')}")
+                self.log_step(f"  - transcription_text length: {len(video_data.get('transcription_text', ''))} characters")
+                self.log_step(f"  - transcript_file_path: {video_data.get('transcript_file_path', 'MISSING')}")
+                self.log_step(f"  - transcript_word_count: {video_data.get('transcript_word_count', 0)}")
+            
+            # Check if this is a YouTube video with transcript already extracted
+            transcription_status = video_data.get('transcription_status', '')
+            transcription_text = video_data.get('transcription_text', '')
+            transcript_file_path = video_data.get('transcript_file_path', '')
+            transcript_word_count = video_data.get('transcript_word_count', 0)
+            is_youtube_completed = (video_data.get('platform', '').lower() == 'youtube' and 
+                                   transcription_status == 'COMPLETED' and 
+                                   transcription_text)
+            
+            if is_youtube_completed:
+                self.log_step(f"DEBUG: YouTube transcript detected - will include in sheets update")
+            
+            # Prepare content info for sheets - MUST match SHEET_COLUMNS structure
+            # Get thumbnail info if available
+            thumbnail_filename = os.path.basename(video_data.get('thumbnail_file_path', '')) if video_data.get('thumbnail_file_path') else ''
+            
+            # Prepare content_info matching the SHEET_COLUMNS structure (same as _prepare_sheet_data)
             content_info = {
+                'drive_id': video_data.get('drive_id', ''),  # May be empty for new entries
                 'filename': video_data.get('filename', ''),
-                'title': video_data.get('title', ''),
-                'description': video_data.get('description', ''),
-                'username': video_data.get('username', ''),
-                'platform': video_data.get('platform', ''),
-                'duration': video_data.get('duration', 0),
-                'view_count': video_data.get('view_count', 0),
-                'like_count': video_data.get('like_count', 0),
-                'comment_count': video_data.get('comment_count', 0),
-                'upload_date': video_data.get('upload_date', ''),
-                'video_path': video_data.get('file_path', ''),
-                'thumbnail_path': video_data.get('thumbnail_file_path', ''),
-                'transcript_path': '',  # Empty for download-only
-                'transcript': '',  # Empty for download-only
-                'word_count': 0,  # Empty for download-only
-                'source_url': video_data.get('webpage_url', ''),
-                'status': 'Downloaded',  # Status for download-only
-                'processing_time': 0,  # Empty for download-only
-                'notes': 'Downloaded only - transcription pending',
-                'error_details': ''
+                'video_name': video_data.get('smart_name', video_data.get('filename', '')),
+                'thumbnail_name': thumbnail_filename,
+                'file_path_drive': f"https://drive.google.com/file/d/{video_data.get('drive_id', '')}/view" if video_data.get('drive_id') else '',
+                'upload_time': video_data.get('updated_at', ''),
+                'upload_status_youtube1': self.STATUS_PENDING,
+                'upload_status_youtube_aiwaverider1': self.STATUS_PENDING,
+                'upload_status_youtube_aiwaverider8': self.STATUS_PENDING,
+                'upload_status_youtube1_aiwaverider8_2': self.STATUS_PENDING,
+                'upload_status_insta_ai.waverider': self.STATUS_PENDING,
+                'upload_status_insta_ai.wave.rider': self.STATUS_PENDING,
+                'upload_status_insta_ai.uprise': self.STATUS_PENDING,
+                'upload_status_tiktok_ai.wave.rider': self.STATUS_PENDING,
+                'upload_status_tiktok_ai.waverider': self.STATUS_PENDING,
+                'upload_status_tiktok_aiwaverider9': self.STATUS_PENDING,
+                'upload_status_thumbnail': self.STATUS_PENDING,  # Will be updated if thumbnail has drive_id
+                'thumbnail_image': '',  # Will be populated after image upload
+                'transcription_status': transcription_status,  # COMPLETED for YouTube with transcript, PENDING for others
+                'transcript': transcription_text if is_youtube_completed else '',  # YouTube: transcript text (may have timestamps/tags); others: empty
+                'clean_transcript': video_data.get('clean_transcript', '') if is_youtube_completed else ''  # YouTube: clean transcript without timestamps/XML tags; others: empty
             }
             
             # Update the sheet
             await self._update_single_entry(content_info)
             
-            self.log_step(f"Successfully updated sheets for video {video_index}")
+            self.log_step(f"Successfully updated sheets for video {video_index} ({'with transcript' if is_youtube_completed else 'download-only'})")
             self.updated_count += 1
             return True
             

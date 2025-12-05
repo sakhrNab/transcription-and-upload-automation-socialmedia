@@ -76,7 +76,7 @@ class TranscriptsSheetsProcessor(BaseProcessor):
             "Video File Size (MB)", "Video Path", "Thumbnail Path", "Transcript Path", "Audio Path",
             
             # Content
-            "Transcript", "Transcript Word Count",
+            "Transcript", "Clean Transcript", "Transcript Word Count",
             
             # Processing Info
             "Source URL", "Status", "Processing Time (seconds)", "Notes", "Error Details"
@@ -297,6 +297,7 @@ class TranscriptsSheetsProcessor(BaseProcessor):
                     'Transcript Path': str(Path(__file__).parent.parent.parent / "assets" / "downloads" / "transcripts" / f"{video.get('video_id', '')}_transcript.txt"),
                         'Audio Path': str(Path(__file__).parent.parent.parent / "assets" / "downloads" / "audio" / f"{os.path.splitext(video_filename)[0]}.wav"),
                     'Transcript': transcript_text,
+                    'Clean Transcript': video.get('clean_transcript', ''),  # Clean transcript without timestamps/XML tags
                     'Transcript Word Count': word_count,
                     'Source URL': video.get('url', ''),
                     'Status': video.get('transcription_status', 'PENDING'),

@@ -79,6 +79,18 @@ class NewDatabaseManager:
         conn = await aiosqlite.connect(self.db_path)
         await conn.executescript(schema_sql)
         await conn.commit()
+        
+        # Migration: Add clean_transcript column if it doesn't exist
+        try:
+            cursor = await conn.execute("PRAGMA table_info(video_transcripts)")
+            columns = [col[1] for col in await cursor.fetchall()]
+            if 'clean_transcript' not in columns:
+                await conn.execute("ALTER TABLE video_transcripts ADD COLUMN clean_transcript TEXT")
+                await conn.commit()
+                logger.log_step("Added clean_transcript column to video_transcripts table")
+        except Exception as e:
+            logger.log_error(f"Error adding clean_transcript column: {str(e)}")
+        
         await conn.close()
     
     async def _create_tables_manually(self):
@@ -116,6 +128,7 @@ class NewDatabaseManager:
                 transcription_status TEXT DEFAULT 'PENDING',
                 smart_name TEXT,
                 transcript_file_path TEXT,
+                clean_transcript TEXT,
                 audio_file_path TEXT,
                 thumbnail_file_path TEXT,
                 video_file_size_mb REAL,
@@ -127,6 +140,16 @@ class NewDatabaseManager:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Migration: Add clean_transcript column if it doesn't exist
+        try:
+            cursor = await conn.execute("PRAGMA table_info(video_transcripts)")
+            columns = [col[1] for col in await cursor.fetchall()]
+            if 'clean_transcript' not in columns:
+                await conn.execute("ALTER TABLE video_transcripts ADD COLUMN clean_transcript TEXT")
+                logger.log_step("Added clean_transcript column to video_transcripts table")
+        except Exception as e:
+            logger.log_error(f"Error adding clean_transcript column: {str(e)}")
         
         # Create upload_tracking table
         await conn.execute("""
@@ -225,9 +248,9 @@ class NewDatabaseManager:
                         like_count, comment_count, upload_date, thumbnail_url,
                         webpage_url, extractor, transcription_text, transcription_status,
                         smart_name, transcript_file_path, audio_file_path, thumbnail_file_path,
-                        video_file_size_mb, transcript_word_count, processing_time_seconds,
+                        clean_transcript, video_file_size_mb, transcript_word_count, processing_time_seconds,
                         notes, error_details, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     video_data.get('video_id', ''),
                     video_data.get('filename', ''),
@@ -258,6 +281,7 @@ class NewDatabaseManager:
                     video_data.get('transcript_file_path', ''),
                     video_data.get('audio_file_path', ''),
                     video_data.get('thumbnail_file_path', ''),
+                    video_data.get('clean_transcript', ''),
                     video_data.get('video_file_size_mb'),
                     video_data.get('transcript_word_count'),
                     video_data.get('processing_time_seconds'),
@@ -734,13 +758,15 @@ class NewDatabaseManager:
             return []
     
     async def get_video_transcript_by_index(self, video_index: int) -> Optional[Dict[str, Any]]:
-        """Get video transcript by processing index"""
+        """Get video transcript by processing index
+        For download-only mode: Gets the most recently updated video"""
         try:
             async with self.get_connection() as conn:
-                # Get the most recently added video (for download-only mode, this should be the current video)
+                # Get the most recently updated video (for download-only mode, this should be the current video)
+                # Use updated_at instead of created_at because INSERT OR REPLACE doesn't update created_at
                 cursor = await conn.execute("""
                     SELECT * FROM video_transcripts 
-                    ORDER BY created_at DESC 
+                    ORDER BY updated_at DESC 
                     LIMIT 1
                 """)
                 row = await cursor.fetchone()
@@ -750,7 +776,12 @@ class NewDatabaseManager:
                     columns = [col[1] for col in await cursor.fetchall()]
                     result = dict(zip(columns, row))
                     # Debug logging
-                    logger.log_step(f"Retrieved most recent video: {result.get('title', 'NO_TITLE')} - Thumbnail: {result.get('thumbnail_file_path', 'NO_THUMBNAIL')}")
+                    logger.log_step(f"Retrieved most recent video (by updated_at): {result.get('title', 'NO_TITLE')}")
+                    logger.log_step(f"  - video_id: {result.get('video_id', 'NO_ID')}")
+                    logger.log_step(f"  - platform: {result.get('platform', 'NO_PLATFORM')}")
+                    logger.log_step(f"  - transcription_status: {result.get('transcription_status', 'NO_STATUS')}")
+                    logger.log_step(f"  - transcription_text length: {len(result.get('transcription_text', ''))} chars")
+                    logger.log_step(f"  - transcript_file_path: {result.get('transcript_file_path', 'NO_PATH')}")
                     return result
                 else:
                     logger.log_step(f"No videos found in database")

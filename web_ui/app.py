@@ -475,6 +475,45 @@ class WebAPI:
                             }
                             active_tasks[task_id]["completed"] = completed
                             active_tasks[task_id]["message"] = f"Downloaded {completed} of {total} videos..."
+                            
+                            # Update sheets after download (for YouTube: includes transcript; for others: download-only)
+                            # Match the transcription phase workflow: update BOTH master sheet AND transcripts sheet
+                            logger.info(f"=== UPDATING SHEETS FOR VIDEO {i} ===")
+                            sheets_success = False
+                            sheets_error = None
+                            try:
+                                # Update master sheet (same as transcription phase)
+                                sheets_success = await self.orchestrator.sheets_processor.update_master_sheet()
+                                
+                                # For YouTube with transcript, also update transcripts sheet (same as transcription phase)
+                                # Check if this is a YouTube video with transcript
+                                video_data = await self.db_manager.get_video_transcript_by_index(i)
+                                if video_data:
+                                    is_youtube_completed = (video_data.get('platform', '').lower() == 'youtube' and 
+                                                           video_data.get('transcription_status', '') == 'COMPLETED' and 
+                                                           video_data.get('transcription_text', ''))
+                                    if is_youtube_completed:
+                                        logger.info(f"Updating transcripts sheet for YouTube video {i}...")
+                                        transcripts_success = await self.orchestrator.transcripts_sheets_processor.update_transcripts_sheet()
+                                        if not transcripts_success:
+                                            sheets_error = "Transcripts sheet update returned False"
+                                    else:
+                                        logger.info(f"Skipping transcripts sheet update (not YouTube with transcript)")
+                                
+                                if not sheets_success:
+                                    sheets_error = "Master sheet update returned False"
+                                    
+                            except Exception as e:
+                                sheets_error = str(e)
+                                logger.error(f"Sheets update failed for video {i} (non-fatal): {sheets_error}")
+                                import traceback
+                                logger.error(f"Traceback: {traceback.format_exc()}")
+                            
+                            if sheets_success and not sheets_error:
+                                logger.info(f"✅ Sheets updated successfully for video {i}")
+                            elif sheets_error:
+                                logger.warning(f"⚠️ Sheets update had issues for video {i}: {sheets_error}")
+                                # Don't fail the download if sheets update fails
                         else:
                             failed += 1
                             active_tasks[task_id]["items"][i-1] = {
