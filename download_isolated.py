@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Download Only Script - Downloads videos without transcription or upload
-Perfect for bulk downloading or testing
+Isolated Download Script - Downloads videos without any other processing
+Bypasses orchestrator and only runs video processor
 """
 
 import sys
@@ -18,16 +18,17 @@ from core.processors.video_processor import VideoProcessor
 from system.new_database import new_db_manager as db_manager
 
 
-async def download_videos_only(urls: List[str]):
-    """Download videos only - no transcription, no upload, no sheets"""
-    print("🎬 Starting Download-Only Mode")
+async def isolated_download(urls: List[str]):
+    """Isolated download - only video processor, no other components"""
+    print("🎬 Starting Isolated Download Mode")
     print("=" * 50)
-    print("📥 Will download videos and extract metadata")
-    print("❌ Will NOT transcribe, upload, or update sheets")
+    print("📥 Downloading videos with metadata extraction")
+    print("❌ No transcription, upload, or sheets processing")
+    print("🔧 Only initializing video processor")
     print()
     
     try:
-        # Initialize database
+        # Initialize database (minimal)
         print("📊 Initializing database...")
         await db_manager.initialize()
         print("✅ Database initialized")
@@ -38,23 +39,26 @@ async def download_videos_only(urls: List[str]):
         await video_processor.initialize()
         print("✅ Video processor ready")
         
-        # Download videos only
-        print(f"\n📥 Downloading {len(urls)} videos...")
+        # Process URLs with video processor only
+        print(f"\n📥 Processing {len(urls)} URLs...")
         print("=" * 50)
         
+        # Use the video processor directly (includes LinkedIn support)
         success = await video_processor.process_urls(urls)
         
         if success:
             print("\n✅ Download completed successfully!")
-            print(f"📁 Videos saved to: assets/downloads/videos/")
-            print(f"🖼️ Thumbnails saved to: assets/downloads/thumbnails/")
+            print(f"📁 Videos saved to: {video_processor.video_output_dir}")
+            print(f"🖼️ Thumbnails saved to: {video_processor.thumbnails_dir}")
+            print(f"📊 Database updated with video metadata")
         else:
             print("\n❌ Download completed with errors")
         
         # Show final status
         print(f"\n📊 Final Status:")
-        print(f"Processed: {video_processor.processed_count}")
-        print(f"Failed: {video_processor.failed_count}")
+        print(f"✅ Processed: {video_processor.processed_count}")
+        print(f"❌ Failed: {video_processor.failed_count}")
+        print(f"📁 Video Processor Status: {video_processor.status}")
         
         # Cleanup
         print("\n🧹 Cleaning up...")
@@ -72,7 +76,7 @@ async def download_videos_only(urls: List[str]):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Download Videos Only - No Transcription or Upload')
+    parser = argparse.ArgumentParser(description='Isolated Download - Video Processor Only')
     parser.add_argument('--urls', nargs='+', help='URLs to download directly')
     parser.add_argument('--urls-file', help='Text file containing URLs (one per line)')
     parser.add_argument('--linkedin', help='Single LinkedIn URL to download')
@@ -111,11 +115,12 @@ if __name__ == "__main__":
                 print("❌ No URLs provided. Use --urls, --urls-file, --linkedin, or create urls.txt")
                 sys.exit(1)
         
-        # Run download only
-        asyncio.run(download_videos_only(urls))
+        # Run isolated download
+        asyncio.run(isolated_download(urls))
         
     except KeyboardInterrupt:
         print("\n⏹️ Process interrupted by user")
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
         sys.exit(1)
+

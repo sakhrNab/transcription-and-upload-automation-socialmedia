@@ -526,6 +526,37 @@ body {
     color: var(--error-color);
 }
 
+/* New status badges for finished videos */
+.status-badge.EDITED_LOCAL {
+    background: var(--warning-light);
+    color: var(--warning-color);
+}
+
+.status-badge.EDITED_PARTIAL {
+    background: var(--info-light);
+    color: var(--info-color);
+}
+
+.status-badge.EDITED_UPLOADED {
+    background: var(--success-light);
+    color: var(--success-color);
+}
+
+.status-badge.LOCAL {
+    background: var(--gray-200);
+    color: var(--gray-600);
+}
+
+.status-badge.PARTIAL {
+    background: var(--info-light);
+    color: var(--info-color);
+}
+
+.status-badge.UPLOADED {
+    background: var(--success-light);
+    color: var(--success-color);
+}
+
 /* Video List */
 .video-list {
     display: grid;
@@ -931,6 +962,22 @@ body {
 .thumbnail-size {
     color: var(--gray-600);
     font-size: var(--font-size-xs);
+}
+
+/* Thumbnail Actions */
+.thumbnail-actions {
+    display: flex;
+    justify-content: center;
+    margin-top: var(--space-4);
+}
+
+.thumbnail-actions .btn {
+    min-width: 200px;
+}
+
+.thumbnail-actions .btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
 }
 
 /* Data Section */

@@ -384,41 +384,13 @@ class UploadProcessor(BaseProcessor):
             return None
     
     async def _upload_thumbnail_file(self, service, file_path: str, state: Dict) -> Optional[str]:
-        """Upload thumbnail file with comprehensive duplicate prevention"""
+        """Upload thumbnail file (duplicate checking done beforehand)"""
         try:
             filename = os.path.basename(file_path)
             current_hash = self._get_file_hash(file_path)
             normalized_path = os.path.normpath(file_path)
             
-            # Step 1: Check database for existing uploads
-            self.log_step(f"Checking database for thumbnail duplicates: {filename}")
-            db_check = await self._check_database_duplicate(filename, file_path)
-            if db_check['exists']:
-                self.log_step(f"SKIP: {filename} - {db_check['status']}")
-                return None
-            
-            # Step 2: Check Drive for files with same name
-            self.log_step(f"Checking Drive for thumbnail filename duplicates: {filename}")
-            name_duplicate = await self._check_duplicate_by_name(service, filename, self.thumbnails_drive_folder_id)
-            if name_duplicate:
-                self.log_step(f"SKIP: {filename} - Thumbnail with same name already exists in Drive (ID: {name_duplicate['id']})")
-                return None
-            
-            # Step 3: Check Drive for files with same content hash
-            self.log_step(f"Checking Drive for thumbnail content duplicates: {filename}")
-            content_duplicate = await self._check_duplicate_by_content(service, current_hash, self.thumbnails_drive_folder_id)
-            if content_duplicate:
-                self.log_step(f"SKIP: {filename} - Thumbnail with same content already exists in Drive (ID: {content_duplicate['id']})")
-                return None
-            
-            # Step 4: Check if file already exists in state (recent upload)
-            if (normalized_path in state and 
-                state[normalized_path].get('file_hash') == current_hash and 
-                state[normalized_path].get('upload_status') == 'COMPLETED'):
-                self.log_step(f"SKIP: {filename} - Thumbnail already uploaded in current session")
-                return state[normalized_path].get('drive_id')
-            
-            # Step 5: All checks passed, proceed with upload
+            # All duplicate checks done beforehand, proceed directly with upload
             self.log_step(f"UPLOAD: {filename} - No duplicates found, proceeding with thumbnail upload")
             
             # Upload the thumbnail
@@ -669,12 +641,27 @@ class UploadProcessor(BaseProcessor):
             # Upload each file
             for file_path, video_data in files_to_upload:
                 try:
+                    self.log_step(f"Starting Google Drive upload: {video_data['filename']}")
                     file_id = await self._upload_video_file(self._drive_service, file_path, state)
                     if file_id:
-                        # Update database with upload status
-                        await db_manager.update_video_status(video_data['id'], 'COMPLETED', file_id)
+                        self.log_step(f"SUCCESS: Google Drive upload successful: {video_data['filename']} (ID: {file_id})")
+                        # Update upload_tracking table with Google Drive upload status
+                        video_id = video_data.get('video_id', '')
+                        if video_id:
+                            await db_manager.upsert_upload_tracking({
+                                'video_id': video_id,
+                                'filename': video_data['filename'],
+                                'file_path': file_path,
+                                'file_type': 'video',
+                                'gdrive_id': file_id,
+                                'gdrive_url': f"https://drive.google.com/file/d/{file_id}/view",
+                                'gdrive_upload_status': 'COMPLETED',
+                                'gdrive_upload_date': datetime.now().isoformat(),
+                                'upload_attempts': 1
+                            })
                         self.uploaded_count += 1
                     else:
+                        self.log_error(f"FAILED: Google Drive upload failed: {video_data['filename']}")
                         self.failed_count += 1
                 except Exception as e:
                     self.log_error(f"Error uploading video {file_path}", e)
@@ -704,16 +691,36 @@ class UploadProcessor(BaseProcessor):
             # Find image files to upload
             all_files = self._find_image_files(self.thumbnails_folder)
             
-            # Filter out already uploaded files
+            # Filter out already uploaded files and check for duplicates
             files_to_upload = []
             for file_path in all_files:
+                filename = os.path.basename(file_path)
                 normalized_path = os.path.normpath(file_path)
+                
+                # Check local state first
                 if normalized_path in state:
                     thumbnail_data = state[normalized_path]
                     if (thumbnail_data.get('upload_status') == 'COMPLETED' and 
                         thumbnail_data.get('drive_id')):
-                        self.log_step(f"Thumbnail {os.path.basename(file_path)} already uploaded. Skipping.")
+                        self.log_step(f"SKIP: {filename} - Already uploaded in local state")
                         continue
+                
+                # Check Google Drive for duplicates BEFORE attempting upload
+                self.log_step(f"Checking Google Drive for duplicates: {filename}")
+                
+                # Check by filename
+                name_duplicate = await self._check_duplicate_by_name(self._drive_service, filename, self.thumbnails_drive_folder_id)
+                if name_duplicate:
+                    self.log_step(f"SKIP: {filename} - Thumbnail with same name already exists in Drive (ID: {name_duplicate['id']})")
+                    continue
+                
+                # Check by content hash
+                current_hash = await self._calculate_file_hash(file_path)
+                content_duplicate = await self._check_duplicate_by_content(self._drive_service, current_hash, self.thumbnails_drive_folder_id)
+                if content_duplicate:
+                    self.log_step(f"SKIP: {filename} - Thumbnail with same content already exists in Drive (ID: {content_duplicate['id']})")
+                    continue
+                
                 files_to_upload.append(file_path)
             
             if not files_to_upload:
@@ -722,17 +729,48 @@ class UploadProcessor(BaseProcessor):
             
             self.log_step(f"Found {len(files_to_upload)} new thumbnails to upload")
             
-            # Upload each file
-            for file_path in files_to_upload:
-                try:
-                    file_id = await self._upload_thumbnail_file(self._drive_service, file_path, state)
-                    if file_id:
-                        self.uploaded_count += 1
-                    else:
-                        self.failed_count += 1
-                except Exception as e:
-                    self.log_error(f"Error uploading thumbnail {file_path}", e)
-                    self.failed_count += 1
+            # Upload files in parallel with controlled concurrency
+            optimal_concurrency = min(5, len(files_to_upload))  # Limit concurrent uploads
+            semaphore = asyncio.Semaphore(optimal_concurrency)
+            
+            async def upload_single_thumbnail(file_path):
+                async with semaphore:
+                    try:
+                        filename = os.path.basename(file_path)
+                        self.log_step(f"Starting Google Drive thumbnail upload: {filename}")
+                        file_id = await self._upload_thumbnail_file(self._drive_service, file_path, state)
+                        if file_id:
+                            self.log_step(f"SUCCESS: Google Drive thumbnail upload successful: {filename} (ID: {file_id})")
+                            # Update upload_tracking table with Google Drive upload status
+                            # Extract video_id from thumbnail filename
+                            video_id = filename.split('_')[-1].replace('.webp', '').replace('.jpg', '').replace('.png', '')
+                            
+                            await db_manager.upsert_upload_tracking({
+                                'video_id': video_id,
+                                'filename': filename,
+                                'file_path': file_path,
+                                'file_type': 'thumbnail',
+                                'gdrive_id': file_id,
+                                'gdrive_url': f"https://drive.google.com/file/d/{file_id}/view",
+                                'gdrive_upload_status': 'COMPLETED',
+                                'gdrive_upload_date': datetime.now().isoformat(),
+                                'upload_attempts': 1
+                            })
+                            return True
+                        else:
+                            self.log_error(f"FAILED: Google Drive thumbnail upload failed: {filename}")
+                            return False
+                    except Exception as e:
+                        self.log_error(f"Error uploading thumbnail {file_path}", e)
+                        return False
+            
+            # Execute all uploads in parallel
+            self.log_step(f"Starting parallel thumbnail uploads with {optimal_concurrency} concurrent workers")
+            results = await asyncio.gather(*[upload_single_thumbnail(file_path) for file_path in files_to_upload])
+            
+            # Count results
+            self.uploaded_count = sum(1 for result in results if result)
+            self.failed_count = len(results) - self.uploaded_count
             
             # Save state to database
             await self._save_thumbnail_state(state)

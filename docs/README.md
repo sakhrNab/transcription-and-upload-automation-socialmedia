@@ -186,6 +186,7 @@ SCENARIO 3: MANUAL UPLOAD PROCESSING
 - **Download-Only Mode**: Separate script for downloading without transcription
 - **Video Limits**: Main processing limited to 5 videos max for efficiency
 - **Flexible Processing**: Choose between full processing or download-only
+- **Skip Download Mode**: Process existing videos without downloading (default behavior)
 
 ## 🚀 Quick Start
 
@@ -213,14 +214,17 @@ cp .env.example .env
 
 #### 1. Main Processing (Download & Transcribe) - **Limited to 5 videos max**
 ```bash
-# Process URLs from file (max 5 videos)
+# Process URLs from file (max 5 videos) - INCLUDES download
+python main.py --urls-file data/urls.txt --download
+
+# Process single URL - INCLUDES download
+python main.py --url "https://instagram.com/p/example" --download
+
+# Process existing videos only (SKIP download) - DEFAULT behavior
 python main.py --urls-file data/urls.txt
 
-# Process single URL
-python main.py --url "https://instagram.com/p/example"
-
-# Process with custom settings
-python main.py --urls-file data/urls.txt --whisper-model large --max-concurrent 2
+# Process with custom settings - INCLUDES download
+python main.py --urls-file data/urls.txt --whisper-model large --max-concurrent 2 --download
 ```
 
 #### 2. Download-Only Mode (No Transcription, No Uploads)

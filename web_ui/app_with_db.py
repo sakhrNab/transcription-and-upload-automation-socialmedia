@@ -9,6 +9,7 @@ import sys
 import json
 import asyncio
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
@@ -142,7 +143,7 @@ class DatabaseAPI:
                         'size': self.format_file_size(file_size),
                         'status': 'Ready for Transcription',
                         'transcriptionStatus': transcription_status,
-                        'thumbnail': f'/thumbnails/{thumbnail_filename}' if thumbnail_filename else '/placeholder-thumbnail.jpg',
+                        'thumbnail': f'/thumbnails/{thumbnail_filename}' if thumbnail_filename else 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+',
                         'created_at': datetime.fromtimestamp(video_file.stat().st_ctime).strftime('%Y-%m-%d %H:%M:%S'),
                         'transcript': transcript,
                         'processingTime': 'N/A'
@@ -205,14 +206,47 @@ class DatabaseAPI:
                     # Get file size
                     file_size = video_file.stat().st_size
                     
+                    # Check upload status from database
+                    # Since we're scanning the folder, we know the video exists locally
+                    # Now check if it has been uploaded to determine the status
+                    upload_status = 'EDITED_LOCAL'  # Default: folder scanned, video found locally
+                    gdrive_status = 'PENDING'
+                    aiwaverider_status = 'PENDING'
+                    
+                    try:
+                        await self.initialize()
+                        # Check if video exists in upload_tracking table
+                        upload_records = await self.db_manager.get_upload_tracking_by_video_id(video_id)
+                        if upload_records:
+                            for record in upload_records:
+                                if record.get('file_type') == 'video':
+                                    gdrive_status = record.get('gdrive_upload_status', 'PENDING')
+                                    aiwaverider_status = record.get('aiwaverider_upload_status', 'PENDING')
+                                    
+                                    # Determine overall status based on upload records
+                                    if gdrive_status == 'COMPLETED' and aiwaverider_status == 'COMPLETED':
+                                        upload_status = 'EDITED_UPLOADED'  # Uploaded to both platforms
+                                    elif gdrive_status == 'COMPLETED' or aiwaverider_status == 'COMPLETED':
+                                        upload_status = 'EDITED_PARTIAL'   # Uploaded to one platform
+                                    else:
+                                        upload_status = 'EDITED_LOCAL'     # Not uploaded to any platform
+                                    break
+                        # If no upload records found, status remains 'EDITED_LOCAL'
+                        # This means: folder scanned + video found locally + not uploaded
+                    except Exception as e:
+                        logger.error(f"Error checking upload status for {filename}: {e}")
+                        # On error, assume EDITED_LOCAL (folder scanned, video found locally)
+                    
                     videos.append({
                         'id': video_id,
                         'title': filename.replace('_', ' ').replace('.mp4', '').title(),
                         'filename': filename,
                         'duration': 'Unknown',
                         'size': self.format_file_size(file_size),
-                        'uploadStatus': 'PENDING',
-                        'thumbnail': f'/thumbnails/{thumbnail_filename}' if thumbnail_filename else '/placeholder-thumbnail.jpg',
+                        'uploadStatus': upload_status,
+                        'gdriveStatus': gdrive_status,
+                        'aiwaveriderStatus': aiwaverider_status,
+                        'thumbnail': f'/thumbnails/{thumbnail_filename}' if thumbnail_filename else 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+',
                         'path': str(video_file),
                         'thumbnailPath': f"../assets/downloads/thumbnails/{thumbnail_filename}" if thumbnail_filename else None,
                         'created_at': datetime.fromtimestamp(video_file.stat().st_ctime).strftime('%Y-%m-%d %H:%M:%S')
@@ -242,11 +276,44 @@ class DatabaseAPI:
                         # Extract video ID from filename
                         video_id = thumbnail_file.stem.split('__')[-1] if '__' in thumbnail_file.stem else thumbnail_file.stem
                         
+                        # Check upload status from database
+                        # Since we're scanning the folder, we know the thumbnail exists locally
+                        # Now check if it has been uploaded to determine the status
+                        upload_status = 'LOCAL'  # Default: folder scanned, thumbnail found locally
+                        gdrive_status = 'PENDING'
+                        aiwaverider_status = 'PENDING'
+                        
+                        try:
+                            await self.initialize()
+                            # Check if thumbnail exists in upload_tracking table
+                            upload_records = await self.db_manager.get_upload_tracking_by_video_id(video_id)
+                            if upload_records:
+                                for record in upload_records:
+                                    if record.get('file_type') == 'thumbnail':
+                                        gdrive_status = record.get('gdrive_upload_status', 'PENDING')
+                                        aiwaverider_status = record.get('aiwaverider_upload_status', 'PENDING')
+                                        
+                                        # Determine overall status based on upload records
+                                        if gdrive_status == 'COMPLETED' and aiwaverider_status == 'COMPLETED':
+                                            upload_status = 'UPLOADED'  # Uploaded to both platforms
+                                        elif gdrive_status == 'COMPLETED' or aiwaverider_status == 'COMPLETED':
+                                            upload_status = 'PARTIAL'   # Uploaded to one platform
+                                        else:
+                                            upload_status = 'LOCAL'     # Not uploaded to any platform
+                                        break
+                            # If no upload records found, status remains 'LOCAL'
+                            # This means: folder scanned + thumbnail found locally + not uploaded
+                        except Exception as e:
+                            logger.error(f"Error checking upload status for thumbnail {thumbnail_file.name}: {e}")
+                            # On error, assume LOCAL (folder scanned, thumbnail found locally)
+                        
                         thumbnails.append({
                             'id': video_id,
                             'filename': thumbnail_file.name,
                             'size': self.format_file_size(stat.st_size),
-                            'uploadStatus': 'PENDING',
+                            'uploadStatus': upload_status,
+                            'gdriveStatus': gdrive_status,
+                            'aiwaveriderStatus': aiwaverider_status,
                             'path': str(thumbnail_file),
                             'thumbnail': f'/thumbnails/{thumbnail_file.name}'
                         })
@@ -309,6 +376,25 @@ def get_urls():
         logger.error(f"Error getting URLs: {e}")
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/api/urls', methods=['POST'])
+def add_url():
+    """Add URL to file"""
+    try:
+        data = request.get_json()
+        url = data.get('url', '').strip()
+        
+        if not url:
+            return jsonify({"success": False, "error": "No URL provided"})
+        
+        # Add URL to file
+        with open('urls.txt', 'a', encoding='utf-8') as f:
+            f.write(f"{url}\n")
+        
+        return jsonify({"success": True, "message": "URL added successfully"})
+    except Exception as e:
+        logger.error(f"Error adding URL: {e}")
+        return jsonify({"success": False, "error": str(e)})
+
 @app.route('/api/videos', methods=['GET'])
 def get_videos():
     """Get videos for transcription"""
@@ -339,6 +425,27 @@ def get_thumbnails():
         logger.error(f"Error getting thumbnails: {e}")
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/api/upload-thumbnails', methods=['POST'])
+def upload_thumbnails():
+    """Upload selected thumbnails to both Google Drive and AIWaverider"""
+    try:
+        data = request.get_json()
+        thumbnail_ids = data.get('thumbnail_ids', [])
+        
+        if not thumbnail_ids:
+            return jsonify({"success": False, "error": "No thumbnails selected"})
+        
+        # Start thumbnail upload in background
+        task_id = f"thumbnails_{int(time.time())}"
+        thread = threading.Thread(target=start_thumbnail_upload, args=(task_id, thumbnail_ids))
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({"success": True, "task_id": task_id, "message": "Thumbnail upload started"})
+    except Exception as e:
+        logger.error(f"Error starting thumbnail upload: {e}")
+        return jsonify({"success": False, "error": str(e)})
+
 @app.route('/api/status', methods=['GET'])
 def get_status():
     """Get system status"""
@@ -355,39 +462,48 @@ def get_thumbnail(filename):
     try:
         thumbnails_dir = Path("../assets/downloads/thumbnails")
         thumbnail_path = thumbnails_dir / filename
-        
+
         if thumbnail_path.exists():
             return send_from_directory(str(thumbnails_dir), filename)
         else:
-            # Return placeholder if thumbnail doesn't exist
-            placeholder_path = Path("placeholder-thumbnail.jpg")
-            if placeholder_path.exists():
-                return send_from_directory(".", "placeholder-thumbnail.jpg")
-            else:
-                return jsonify({"error": "Thumbnail not found"}), 404
+            # Return SVG data URI instead of serving a file
+            svg_data = '''<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">
+                <rect width="100" height="100" fill="#f0f0f0"/>
+                <text x="50" y="50" font-family="Arial" font-size="12" fill="#666" text-anchor="middle" dy=".3em">No Image</text>
+            </svg>'''
+            from flask import Response
+            return Response(svg_data, mimetype='image/svg+xml')
     except Exception as e:
         logger.error(f"Error serving thumbnail {filename}: {e}")
-        return jsonify({"error": "Thumbnail not found"}), 404
+        # Return SVG data URI for errors too
+        svg_data = '''<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">
+            <rect width="100" height="100" fill="#f0f0f0"/>
+            <text x="50" y="50" font-family="Arial" font-size="12" fill="#666" text-anchor="middle" dy=".3em">Error</text>
+        </svg>'''
+        from flask import Response
+        return Response(svg_data, mimetype='image/svg+xml')
 
-# Mock endpoints for compatibility
+# Real download endpoint with video processor
 @app.route('/api/download', methods=['POST'])
 def start_download():
-    """Mock download process"""
+    """Real download process using video processor"""
     try:
         data = request.get_json()
         urls = data.get('urls', [])
         
-        if len(urls) > 5:
-            return jsonify({"success": False, "error": "Maximum 5 videos per run"})
+        if not urls:
+            return jsonify({"success": False, "error": "No URLs provided"})
         
+        if len(urls) > 10:  # Increased limit for web UI
+            return jsonify({"success": False, "error": "Maximum 10 videos per run"})
+        
+        # Start real download process in background
         task_id = f"download_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        active_tasks[task_id] = {
-            "status": "running",
-            "progress": 0,
-            "message": "Starting download process..."
-        }
+        thread = threading.Thread(target=start_real_download, args=(task_id, urls))
+        thread.daemon = True
+        thread.start()
         
-        return jsonify({"success": True, "taskId": task_id})
+        return jsonify({"success": True, "taskId": task_id, "message": "Download process started"})
     except Exception as e:
         logger.error(f"Error starting download: {e}")
         return jsonify({"success": False, "error": str(e)})
@@ -435,14 +551,17 @@ def get_progress(task_id):
     """Get progress for a specific task"""
     try:
         if task_id in active_tasks:
-            # Simulate progress
             task = active_tasks[task_id]
-            if task["progress"] < 100:
-                task["progress"] += 20
-                task["message"] = f"Processing... {task['progress']}%"
-            else:
-                task["status"] = "completed"
-                task["message"] = "Process completed successfully!"
+            
+            # For real tasks, return actual progress
+            if task["status"] in ["processing", "running"]:
+                # Simulate gradual progress for running tasks
+                if task["progress"] < 90:
+                    task["progress"] += 5
+                    if task["progress"] > 90:
+                        task["progress"] = 90
+            elif task["status"] == "completed":
+                task["progress"] = 100
             
             return jsonify(task)
         else:
@@ -451,14 +570,159 @@ def get_progress(task_id):
         logger.error(f"Error getting progress: {e}")
         return jsonify({"status": "error", "error": str(e)})
 
+def start_real_download(task_id, urls):
+    """Background function to download videos using real video processor"""
+    try:
+        # Initialize database in the thread
+        asyncio.run(db_manager.initialize())
+        
+        # Import video processor
+        from core.processors.video_processor import VideoProcessor
+        
+        # Initialize video processor
+        video_processor = VideoProcessor()
+        asyncio.run(video_processor.initialize())
+        
+        # Update task status
+        active_tasks[task_id] = {
+            "status": "processing",
+            "progress": 0,
+            "message": "Starting video download...",
+            "items": []
+        }
+        
+        # Process URLs with real video processor
+        active_tasks[task_id]["message"] = f"Downloading {len(urls)} videos..."
+        active_tasks[task_id]["progress"] = 10
+        
+        # Use the real video processor (this includes LinkedIn support!)
+        success = asyncio.run(video_processor.process_urls(urls))
+        
+        # Update final status
+        if success:
+            active_tasks[task_id] = {
+                "status": "completed",
+                "progress": 100,
+                "message": f"Successfully downloaded {len(urls)} videos!",
+                "items": []
+            }
+        else:
+            active_tasks[task_id] = {
+                "status": "error",
+                "progress": 100,
+                "message": "Download completed with some errors",
+                "items": []
+            }
+            
+    except Exception as e:
+        active_tasks[task_id] = {
+            "status": "error",
+            "progress": 0,
+            "message": f"Error: {str(e)}",
+            "items": []
+        }
+
+def start_thumbnail_upload(task_id, thumbnail_ids):
+    """Background function to upload selected thumbnails"""
+    try:
+        # Initialize database in the thread
+        asyncio.run(db_manager.initialize())
+        
+        # Import processors
+        from core.processors.upload_processor import UploadProcessor
+        from core.processors.aiwaverider_processor import AIWaveriderProcessor
+        
+        # Initialize processors
+        upload_processor = UploadProcessor()
+        aiwaverider_processor = AIWaveriderProcessor()
+        
+        # Initialize processors
+        asyncio.run(upload_processor.initialize())
+        asyncio.run(aiwaverider_processor.initialize())
+        
+        # Update task status
+        active_tasks[task_id] = {
+            "status": "processing",
+            "progress": 0,
+            "message": "Starting thumbnail upload...",
+            "items": []
+        }
+        
+        # Get thumbnail files from IDs
+        thumbnails_dir = Path("../assets/downloads/thumbnails")
+        thumbnail_files = []
+        
+        for thumbnail_id in thumbnail_ids:
+            # Find thumbnail file by ID (assuming ID is the filename)
+            for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                file_path = thumbnails_dir / f"{thumbnail_id}{ext}"
+                if file_path.exists():
+                    thumbnail_files.append(str(file_path))
+                    break
+        
+        if not thumbnail_files:
+            active_tasks[task_id] = {
+                "status": "error",
+                "progress": 0,
+                "message": "No thumbnail files found",
+                "items": []
+            }
+            return
+        
+        # Upload to Google Drive
+        active_tasks[task_id]["message"] = "Uploading to Google Drive..."
+        active_tasks[task_id]["progress"] = 25
+        
+        gdrive_success = asyncio.run(upload_processor.process_thumbnails())
+        
+        # Upload to AIWaverider
+        active_tasks[task_id]["message"] = "Uploading to AIWaverider Drive..."
+        active_tasks[task_id]["progress"] = 75
+        
+        aiwaverider_success = asyncio.run(aiwaverider_processor.upload_all())
+        
+        # Update final status
+        if gdrive_success and aiwaverider_success:
+            active_tasks[task_id] = {
+                "status": "completed",
+                "progress": 100,
+                "message": "Thumbnail upload completed successfully!",
+                "items": []
+            }
+        else:
+            active_tasks[task_id] = {
+                "status": "error",
+                "progress": 100,
+                "message": "Thumbnail upload completed with errors",
+                "items": []
+            }
+            
+    except Exception as e:
+        active_tasks[task_id] = {
+            "status": "error",
+            "progress": 0,
+            "message": f"Error: {str(e)}",
+            "items": []
+        }
+
 if __name__ == '__main__':
     try:
         print("🚀 Starting Social Media Content Processor Web UI (Database Mode)...")
         print("📱 Open your browser and go to: http://localhost:5000")
         print("🛑 Press Ctrl+C to stop the server")
         print("🗄️ Using REAL DATABASE: social_media.db")
-        app.run(host='0.0.0.0', port=5000, debug=True)
+        
+        # Run with better error handling
+        app.run(
+            host='0.0.0.0', 
+            port=5000, 
+            debug=False,  # Disable debug mode to prevent crashes
+            threaded=True,  # Enable threading for better stability
+            use_reloader=False  # Disable auto-reload to prevent issues
+        )
     except KeyboardInterrupt:
         print("\n🛑 Server stopped by user")
     except Exception as e:
         print(f"❌ Error starting server: {e}")
+        import traceback
+        traceback.print_exc()

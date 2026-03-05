@@ -11,6 +11,7 @@ import asyncio
 import argparse
 from pathlib import Path
 from typing import List
+from datetime import datetime
 
 # Add current directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -108,8 +109,79 @@ async def transcribe_only(video_ids: List[str] = None, max_videos: int = None, a
         return False
 
 
+async def find_video_in_file_system(video_id: str) -> dict:
+    """Find video in file system by video_id and create database entry"""
+    try:
+        # Check the downloads/videos directory
+        videos_dir = Path("assets/downloads/videos")
+        if not videos_dir.exists():
+            print(f"  📁 Videos directory not found: {videos_dir}")
+            return None
+        
+        # Look for video files containing the video_id
+        video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.webm']
+        found_files = []
+        
+        for ext in video_extensions:
+            # Look for files that contain the video_id in the filename
+            pattern = f"*{video_id}*{ext}"
+            matching_files = list(videos_dir.glob(pattern))
+            found_files.extend(matching_files)
+        
+        if not found_files:
+            print(f"  ❌ No video files found with ID: {video_id}")
+            return None
+        
+        # Use the first matching file
+        video_file = found_files[0]
+        print(f"  📁 Found video file: {video_file.name}")
+        
+        # Extract metadata from filename
+        filename = video_file.name
+        file_path = str(video_file)
+        
+        # Try to extract title and other info from filename
+        # Format is usually: "number_title_videoID.ext"
+        parts = filename.replace(ext, '').split('_')
+        if len(parts) >= 3:
+            title = '_'.join(parts[1:-1])  # Everything between first and last part
+        else:
+            title = filename.replace(ext, '')
+        
+        # Get file size
+        file_size_mb = video_file.stat().st_size / (1024 * 1024)
+        
+        # Create video data structure
+        video_data = {
+            'video_id': video_id,
+            'filename': filename,
+            'file_path': file_path,
+            'title': title,
+            'description': f'Video found in file system: {filename}',
+            'username': 'unknown',
+            'platform': 'unknown',
+            'duration': 0,  # Will be updated during processing
+            'video_file_size_mb': round(file_size_mb, 2),
+            'transcription_status': 'PENDING',
+            'transcription_text': '',
+            'smart_name': '',
+            'transcript_file_path': '',
+            'audio_file_path': '',
+            'thumbnail_file_path': '',
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
+        }
+        
+        print(f"  ✅ Created video data for: {filename}")
+        return video_data
+        
+    except Exception as e:
+        print(f"  ❌ Error finding video in file system: {str(e)}")
+        return None
+
+
 async def get_videos_for_transcription(video_ids: List[str] = None, max_videos: int = None, all_pending: bool = False) -> List[dict]:
-    """Get videos that need transcription from database"""
+    """Get videos that need transcription from database and file system"""
     try:
         if all_pending:
             # Get all videos with PENDING transcription status
@@ -127,19 +199,30 @@ async def get_videos_for_transcription(video_ids: List[str] = None, max_videos: 
             return pending_videos
             
         elif video_ids:
-            # Get specific videos by video_id
+            # Get specific videos by video_id - check both database and file system
             print(f"🔍 Finding specific videos: {video_ids}")
             videos_to_transcribe = []
             for video_id in video_ids:
+                # First check database
                 video_data = await db_manager.get_video_transcript_by_id(video_id)
                 if video_data:
                     if video_data.get('transcription_status') != 'COMPLETED':
                         videos_to_transcribe.append(video_data)
-                        print(f"✅ Found video for transcription: {video_data.get('filename')} (ID: {video_id})")
+                        print(f"✅ Found video in database for transcription: {video_data.get('filename')} (ID: {video_id})")
                     else:
                         print(f"⚠️ Video {video_id} already transcribed (status: {video_data.get('transcription_status')})")
                 else:
-                    print(f"❌ Video {video_id} not found in database")
+                    # Video not in database, check file system
+                    print(f"🔍 Video {video_id} not found in database, checking file system...")
+                    file_system_video = await find_video_in_file_system(video_id)
+                    if file_system_video:
+                        # Add to database first
+                        print(f"📝 Adding video to database: {file_system_video.get('filename')} (ID: {video_id})")
+                        await db_manager.upsert_video_transcript(file_system_video)
+                        videos_to_transcribe.append(file_system_video)
+                        print(f"✅ Found video in file system for transcription: {file_system_video.get('filename')} (ID: {video_id})")
+                    else:
+                        print(f"❌ Video {video_id} not found in database or file system")
             
             return videos_to_transcribe
             
@@ -161,6 +244,138 @@ async def get_videos_for_transcription(video_ids: List[str] = None, max_videos: 
     except Exception as e:
         print(f"❌ Error getting videos for transcription: {str(e)}")
         return []
+
+
+async def update_sheets_without_uploads(sheets_processor) -> bool:
+    """Update sheets without uploading any files - transcription only mode"""
+    try:
+        print("  📊 Updating sheets without uploads...")
+        
+        # Get all videos and thumbnails from database
+        videos = await db_manager.get_all_video_transcripts()
+        thumbnails = await db_manager.get_all_thumbnails()
+        
+        if not videos:
+            print("  📭 No videos found to update in master sheet")
+            return True
+        
+        # Convert to sheet format (without uploads)
+        content_list = await prepare_sheet_data_without_uploads(videos, thumbnails)
+        
+        if not content_list:
+            print("  📭 No data to update in master sheet")
+            return True
+        
+        # Update the sheet (without uploads)
+        success = await update_sheet_without_uploads(sheets_processor, content_list)
+        
+        if success:
+            print(f"  ✅ Sheets updated successfully with {len(content_list)} entries")
+            return True
+        else:
+            print("  ❌ Failed to update master sheet")
+            return False
+        
+    except Exception as e:
+        print(f"  ❌ Error updating sheets: {str(e)}")
+        return False
+
+
+async def prepare_sheet_data_without_uploads(videos: List[dict], thumbnails: List[dict]) -> List[dict]:
+    """Prepare data for sheet update without uploads"""
+    try:
+        content_list = []
+        
+        # Process videos
+        for video in videos:
+            # Find matching thumbnail
+            video_filename = video.get('filename', '')
+            base_name = os.path.splitext(video_filename)[0]
+            matching_thumbnail = None
+            
+            for thumbnail in thumbnails:
+                if base_name in thumbnail.get('filename', '') or base_name in thumbnail.get('video_filename', ''):
+                    matching_thumbnail = thumbnail
+                    break
+            
+            # Prepare content info (NO UPLOADS)
+            content_info = {
+                'drive_id': video.get('drive_id', ''),
+                'filename': video_filename,
+                'video_name': video.get('smart_name', video_filename),
+                'thumbnail_name': matching_thumbnail.get('filename', '') if matching_thumbnail else '',
+                'file_path_drive': f"https://drive.google.com/file/d/{video.get('drive_id', '')}/view" if video.get('drive_id') else '',
+                'upload_time': video.get('updated_at', ''),
+                'upload_status_youtube1': 'PENDING',
+                'upload_status_youtube_aiwaverider1': 'PENDING',
+                'upload_status_youtube_aiwaverider8': 'PENDING',
+                'upload_status_youtube1_aiwaverider8_2': 'PENDING',
+                'upload_status_insta_ai.waverider': 'PENDING',
+                'upload_status_insta_ai.wave.rider': 'PENDING',
+                'upload_status_insta_ai.uprise': 'PENDING',
+                'upload_status_tiktok_ai.wave.rider': 'PENDING',
+                'upload_status_tiktok_ai.waverider': 'PENDING',
+                'upload_status_tiktok_aiwaverider9': 'PENDING',
+                'upload_status_thumbnail': 'UPLOADED' if matching_thumbnail and matching_thumbnail.get('drive_id') else 'PENDING',
+                'thumbnail_image': '',  # NO IMAGE UPLOADS
+                'transcription_status': video.get('transcription_status', 'PENDING'),
+                'transcript': video.get('transcription_text', '')
+            }
+            content_list.append(content_info)
+        
+        return content_list
+        
+    except Exception as e:
+        print(f"  ❌ Error preparing sheet data: {str(e)}")
+        return []
+
+
+async def update_sheet_without_uploads(sheets_processor, content_list: List[dict]) -> bool:
+    """Update the Google Sheet with the prepared data without uploads"""
+    try:
+        if not sheets_processor.service:
+            print("  📝 No Google Sheets service available, saving to local backup")
+            for content_info in content_list:
+                filename = content_info['filename']
+                sheets_processor.local_data['rows'][filename] = content_info
+            sheets_processor._save_local_backup()
+            return True
+        
+        # First, cleanup any existing duplicates
+        print("  🧹 Cleaning up duplicate entries in Google Sheets...")
+        await sheets_processor._cleanup_duplicates()
+        
+        # Update the sheet with new data (NO UPLOADS)
+        print(f"  📊 Updating Google Sheet with {len(content_list)} entries")
+        
+        # Separate existing and new entries
+        existing_entries = []
+        new_entries = []
+        
+        for content_info in content_list:
+            filename = content_info['filename']
+            if filename in sheets_processor.local_data['rows']:
+                existing_entries.append(content_info)
+            else:
+                new_entries.append(content_info)
+        
+        # Update existing entries individually
+        for content_info in existing_entries:
+            await sheets_processor._update_single_entry(content_info)
+        
+        # Add new entries in batch
+        if new_entries:
+            await sheets_processor._add_new_entries(new_entries)
+        
+        # Save tracking data locally
+        await sheets_processor._save_tracking_data_locally(content_list)
+        
+        print("  ✅ Google Sheet updated successfully")
+        return True
+        
+    except Exception as e:
+        print(f"  ❌ Error updating sheet: {str(e)}")
+        return False
 
 
 async def process_transcriptions_only(orchestrator, videos_to_transcribe: List[dict]) -> bool:
@@ -204,9 +419,9 @@ async def process_transcriptions_only(orchestrator, videos_to_transcribe: List[d
                     print(f"  ✅ Video {i} transcribed successfully")
                     successful_transcriptions += 1
                     
-                    # Update sheets after transcription
+                    # Update sheets after transcription (NO UPLOADS)
                     print(f"  📊 Updating sheets for video {i}...")
-                    sheets_success = await orchestrator.sheets_processor.update_master_sheet()
+                    sheets_success = await update_sheets_without_uploads(orchestrator.sheets_processor)
                     transcripts_success = await orchestrator.transcripts_sheets_processor.update_transcripts_sheet()
                     
                     if sheets_success and transcripts_success:

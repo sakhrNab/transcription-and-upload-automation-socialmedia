@@ -8,8 +8,8 @@ upload_tracking table: Tracks uploads to Google Drive and AIWaverider
 import aiosqlite
 import json
 import asyncio
-import threading
 from datetime import datetime
+import threading
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 from .config import settings
@@ -287,7 +287,7 @@ class NewDatabaseManager:
                         gdrive_id, gdrive_url, gdrive_upload_status, gdrive_upload_date, gdrive_folder_id,
                         aiwaverider_id, aiwaverider_url, aiwaverider_upload_status, aiwaverider_upload_date, aiwaverider_folder_path,
                         upload_attempts, last_upload_attempt, error_message, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     upload_data.get('video_id', ''),
                     upload_data.get('filename', ''),
@@ -307,7 +307,7 @@ class NewDatabaseManager:
                     upload_data.get('upload_attempts', 0),
                     upload_data.get('last_upload_attempt'),
                     upload_data.get('error_message', ''),
-                    datetime.now().isoformat()
+                    upload_data.get('updated_at', datetime.now().isoformat())
                 ))
                 await conn.commit()
                 return True

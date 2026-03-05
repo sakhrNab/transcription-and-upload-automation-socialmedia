@@ -177,11 +177,22 @@ class AIWaveriderProcessor(BaseProcessor):
             
             async def upload_with_semaphore(file_type: str, file_path: str, file_data: Dict):
                 async with semaphore:
-                    self.log_step(f"Uploading {file_type}: {os.path.basename(file_path)}")
+                    filename = os.path.basename(file_path)
+                    self.log_step(f"Starting AIWaverider {file_type} upload: {filename}")
                     if file_type == 'video':
-                        return await self._upload_video_to_aiwaverider(file_path)
+                        result = await self._upload_video_to_aiwaverider(file_path)
+                        if result:
+                            self.log_step(f"✅ AIWaverider video upload successful: {filename}")
+                        else:
+                            self.log_error(f"❌ AIWaverider video upload failed: {filename}")
+                        return result
                     else:
-                        return await self._upload_thumbnail_to_aiwaverider(file_path)
+                        result = await self._upload_thumbnail_to_aiwaverider(file_path)
+                        if result:
+                            self.log_step(f"✅ AIWaverider thumbnail upload successful: {filename}")
+                        else:
+                            self.log_error(f"❌ AIWaverider thumbnail upload failed: {filename}")
+                        return result
             
             # Execute uploads in parallel
             results = await asyncio.gather(
@@ -198,11 +209,21 @@ class AIWaveriderProcessor(BaseProcessor):
                     self.failed_count += 1
                 elif result:
                     self.uploaded_count += 1
-                    # Update database status
-                    if file_type == 'video':
-                        await db_manager.update_video_aiwaverider_status(file_data['id'], 'COMPLETED')
-                    else:
-                        await db_manager.update_thumbnail_aiwaverider_status(file_data['id'], 'COMPLETED')
+                    # Update upload_tracking table with AIWaverider upload status
+                    video_id = file_data.get('video_id', '')
+                    if video_id:
+                        await db_manager.upsert_upload_tracking({
+                            'video_id': video_id,
+                            'filename': file_data['filename'],
+                            'file_path': file_path,
+                            'file_type': file_type,
+                            'aiwaverider_id': result.get('id', ''),
+                            'aiwaverider_url': result.get('url', ''),
+                            'aiwaverider_upload_status': 'COMPLETED',
+                            'aiwaverider_upload_date': datetime.now().isoformat(),
+                            'aiwaverider_folder_path': result.get('folder_path', ''),
+                            'upload_attempts': 1
+                        })
                 else:
                     self.failed_count += 1
             

@@ -80,6 +80,7 @@
 │                              MAIN PROCESSING FLOW                              │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
+WITH DOWNLOAD (--download flag):
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │ Read URLs   │───▶│ Download    │───▶│ Transcribe  │───▶│ Upload to   │
 │ from file   │    │ Videos      │    │ Audio       │    │ Both Drives │
@@ -95,6 +96,20 @@
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │ Check for   │    │ Convert to  │    │ Save        │    │ Track       │
 │ Duplicates  │    │ Audio       │    │ Transcripts │    │ Status      │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+
+WITHOUT DOWNLOAD (default behavior):
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│ Read        │───▶│ Skip        │───▶│ Transcribe  │───▶│ Upload to   │
+│ Existing    │    │ Download    │    │ Audio       │    │ Both Drives │
+│ Videos      │    │ (Use DB)    │    │             │    │             │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+       │                   │                   │                   │
+       ▼                   ▼                   ▼                   ▼
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│ Check       │    │ Use         │    │ Generate    │    │ Update      │
+│ Database    │    │ Existing    │    │ Thumbnails  │    │ Sheets      │
+│ Status      │    │ Files       │    │             │    │             │
 └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
 ```
 

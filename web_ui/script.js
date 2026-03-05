@@ -14,6 +14,10 @@ class SocialMediaProcessor {
             upload: 0
         };
         
+        // Rate limiting for API calls
+        this.lastApiCall = 0;
+        this.apiCallDelay = 1000; // 1 second between API calls
+        
         this.init();
     }
 
@@ -101,6 +105,10 @@ class SocialMediaProcessor {
         });
         document.getElementById('toggleThumbnails').addEventListener('click', () => {
             this.toggleThumbnails();
+        });
+        
+        document.getElementById('uploadSelectedThumbnails').addEventListener('click', () => {
+            this.uploadSelectedThumbnails();
         });
 
         // Data refresh events
@@ -199,14 +207,60 @@ class SocialMediaProcessor {
     }
 
     async loadInitialData() {
-        await this.loadUrls();
-        await this.loadVideos();
-        await this.loadFinishedVideos();
-        await this.loadThumbnails();
-        await this.loadDownloadData();
-        await this.loadTranscribeData();
-        await this.loadUploadData();
-        this.updateStatusPanel();
+        try {
+            // Add small delays between each load to prevent overwhelming the server
+            await this.loadWithRetry(() => this.loadUrls(), 'URLs');
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            await this.loadWithRetry(() => this.loadVideos(), 'Videos');
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            await this.loadWithRetry(() => this.loadFinishedVideos(), 'Finished Videos');
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            await this.loadWithRetry(() => this.loadThumbnails(), 'Thumbnails');
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            await this.loadWithRetry(() => this.loadDownloadData(), 'Download Data');
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            await this.loadWithRetry(() => this.loadTranscribeData(), 'Transcription Data');
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            await this.loadWithRetry(() => this.loadUploadData(), 'Upload Data');
+            this.updateStatusPanel();
+        } catch (error) {
+            console.error('Error loading initial data:', error);
+            this.showToast('Some data failed to load. Please refresh the page.', 'error');
+        }
+    }
+
+    async loadWithRetry(loadFunction, dataType, maxRetries = 3) {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                await loadFunction();
+                return; // Success
+            } catch (error) {
+                console.warn(`Failed to load ${dataType} (attempt ${attempt}/${maxRetries}):`, error);
+                if (attempt === maxRetries) {
+                    throw error; // Final attempt failed
+                }
+                // Wait before retry (exponential backoff)
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            }
+        }
+    }
+
+    async rateLimitedFetch(url, options = {}) {
+        const now = Date.now();
+        const timeSinceLastCall = now - this.lastApiCall;
+        
+        if (timeSinceLastCall < this.apiCallDelay) {
+            await new Promise(resolve => setTimeout(resolve, this.apiCallDelay - timeSinceLastCall));
+        }
+        
+        this.lastApiCall = Date.now();
+        return fetch(url, options);
     }
 
     async loadUrls() {
@@ -284,8 +338,8 @@ class SocialMediaProcessor {
             return;
         }
 
-        if (this.selectedUrls.size > 5) {
-            this.showToast('Maximum 5 videos per run', 'error');
+        if (this.selectedUrls.size > 10) {
+            this.showToast('Maximum 10 videos per run', 'error');
             return;
         }
 
@@ -353,6 +407,12 @@ class SocialMediaProcessor {
         const progressGrid = document.getElementById('downloadProgressGrid');
         progressGrid.innerHTML = '';
 
+        // Check if progressData and items exist
+        if (!progressData || !progressData.items || !Array.isArray(progressData.items)) {
+            console.warn('Invalid progress data:', progressData);
+            return;
+        }
+
         progressData.items.forEach(item => {
             const progressItem = document.createElement('div');
             progressItem.className = `progress-item ${item.status}`;
@@ -391,7 +451,7 @@ class SocialMediaProcessor {
             videoItem.className = 'video-item';
             videoItem.innerHTML = `
                 <input type="checkbox" class="video-checkbox" data-video-id="${video.id}" id="video-${index}">
-                <img src="${video.thumbnail || '/placeholder-thumbnail.jpg'}" alt="Thumbnail" class="video-thumbnail">
+                <img src="${video.thumbnail || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+'}" alt="Thumbnail" class="video-thumbnail" onerror="this.style.display='none';">
                 <div class="video-info">
                     <div class="video-title">${video.title}</div>
                     <div class="video-meta">
@@ -563,13 +623,15 @@ class SocialMediaProcessor {
             videoItem.className = 'video-item';
             videoItem.innerHTML = `
                 <input type="checkbox" class="video-checkbox" data-video-id="${video.id}" id="finished-video-${index}">
-                <img src="${video.thumbnail || '/placeholder-thumbnail.jpg'}" alt="Thumbnail" class="video-thumbnail">
+                <img src="${video.thumbnail || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+'}" alt="Thumbnail" class="video-thumbnail" onerror="this.style.display='none';">
                 <div class="video-info">
                     <div class="video-title">${video.title}</div>
                     <div class="video-meta">
                         <span>Duration: ${video.duration}</span>
                         <span>Size: ${video.size}</span>
                         <span>Status: ${video.uploadStatus}</span>
+                        ${video.gdriveStatus ? `<span>Google Drive: ${video.gdriveStatus}</span>` : ''}
+                        ${video.aiwaveriderStatus ? `<span>AIWaverider: ${video.aiwaveriderStatus}</span>` : ''}
                     </div>
                 </div>
                 <div class="video-actions">
@@ -748,7 +810,7 @@ class SocialMediaProcessor {
     }
 
     // Custom URL functionality
-    addCustomUrl() {
+    async addCustomUrl() {
         const input = document.getElementById('customUrlInput');
         const url = input.value.trim();
         
@@ -757,30 +819,58 @@ class SocialMediaProcessor {
             return;
         }
         
-        // Add to URL list
-        const urlList = document.getElementById('urlList');
-        const urlItem = document.createElement('div');
-        urlItem.className = 'url-item';
-        urlItem.innerHTML = `
-            <input type="checkbox" class="url-checkbox" value="${url}">
-            <div class="url-content">
-                <div class="url-text">${url}</div>
-                <div class="url-source">Custom URL</div>
-            </div>
-        `;
-        
-        urlList.appendChild(urlItem);
-        
-        // Clear input
-        input.value = '';
-        
-        // Add event listener for checkbox
-        const checkbox = urlItem.querySelector('.url-checkbox');
-        checkbox.addEventListener('change', (e) => {
-            this.toggleUrlSelection(e.target.value, e.target.checked);
-        });
-        
-        this.showToast('Custom URL added successfully!', 'success');
+        try {
+            console.log('Adding URL to file:', url);
+            // Add URL to file via API
+            const response = await this.rateLimitedFetch('/api/urls', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ url: url })
+            });
+
+            console.log('API response status:', response.status);
+            const data = await response.json();
+            console.log('API response data:', data);
+
+            if (data.success) {
+                // Add to URL list in UI
+                const urlList = document.getElementById('urlList');
+                const urlItem = document.createElement('div');
+                urlItem.className = 'url-item';
+                urlItem.innerHTML = `
+                    <input type="checkbox" class="url-checkbox" value="${url}">
+                    <div class="url-content">
+                        <div class="url-text">${url}</div>
+                        <div class="url-source">Custom URL</div>
+                    </div>
+                `;
+                
+                urlList.appendChild(urlItem);
+                
+                // Clear input
+                input.value = '';
+                
+                // Add event listener for checkbox
+                const checkbox = urlItem.querySelector('.url-checkbox');
+                checkbox.addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        this.selectedUrls.add(url);
+                    } else {
+                        this.selectedUrls.delete(url);
+                    }
+                    this.updateSelectionInfo();
+                });
+                
+                this.showToast('Custom URL added to file and UI!', 'success');
+            } else {
+                this.showToast(`Error: ${data.error}`, 'error');
+            }
+        } catch (error) {
+            this.showToast('Error adding URL to file', 'error');
+            console.error('Error adding URL:', error);
+        }
     }
 
     // Thumbnails functionality
@@ -813,7 +903,11 @@ class SocialMediaProcessor {
                 <div class="thumbnail-checkbox">
                     <i class="fas fa-check" style="display: none;"></i>
                 </div>
-                <img src="${thumbnail.thumbnail}" alt="${thumbnail.filename}" class="thumbnail-preview" onerror="this.src='/placeholder-thumbnail.jpg'">
+                <img src="${thumbnail.thumbnail || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+'}" alt="${thumbnail.filename}" class="thumbnail-preview" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                <div class="thumbnail-fallback" style="display: none; background: #f0f0f0; color: #666; text-align: center; padding: 20px; border-radius: 4px;">
+                    <i class="fas fa-image" style="font-size: 24px; margin-bottom: 8px;"></i>
+                    <div>No Preview</div>
+                </div>
                 <div class="thumbnail-info">
                     <div class="thumbnail-filename">${thumbnail.filename}</div>
                     <div class="thumbnail-size">${thumbnail.size}</div>
@@ -859,8 +953,15 @@ class SocialMediaProcessor {
 
     updateThumbnailSelectionCount() {
         const countElement = document.querySelector('#thumbnailList').parentElement.querySelector('.selection-count');
+        const uploadButton = document.getElementById('uploadSelectedThumbnails');
+        
         if (countElement) {
             countElement.textContent = `${this.selectedThumbnails.size} thumbnails selected`;
+        }
+        
+        // Enable/disable upload button based on selection
+        if (uploadButton) {
+            uploadButton.disabled = this.selectedThumbnails.size === 0;
         }
     }
 
@@ -879,6 +980,75 @@ class SocialMediaProcessor {
             toggleText.textContent = 'Show Thumbnails';
             toggleIcon.className = 'fas fa-chevron-down';
         }
+    }
+
+    async uploadSelectedThumbnails() {
+        if (this.selectedThumbnails.size === 0) {
+            this.showToast('No thumbnails selected', 'error');
+            return;
+        }
+
+        try {
+            const uploadButton = document.getElementById('uploadSelectedThumbnails');
+            uploadButton.disabled = true;
+            uploadButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+
+            const response = await fetch('/api/upload-thumbnails', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    thumbnail_ids: Array.from(this.selectedThumbnails)
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                this.showToast('Thumbnail upload started!', 'success');
+                this.startThumbnailUploadProgress(data.task_id);
+            } else {
+                this.showToast(`Upload failed: ${data.error}`, 'error');
+                uploadButton.disabled = false;
+                uploadButton.innerHTML = '<i class="fas fa-upload"></i> Upload Selected Thumbnails';
+            }
+        } catch (error) {
+            console.error('Error uploading thumbnails:', error);
+            this.showToast('Error uploading thumbnails', 'error');
+            const uploadButton = document.getElementById('uploadSelectedThumbnails');
+            uploadButton.disabled = false;
+            uploadButton.innerHTML = '<i class="fas fa-upload"></i> Upload Selected Thumbnails';
+        }
+    }
+
+    startThumbnailUploadProgress(taskId) {
+        const progressInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`/api/progress/${taskId}`);
+                const data = await response.json();
+
+                if (data.status === 'completed') {
+                    clearInterval(progressInterval);
+                    this.showToast('Thumbnail upload completed!', 'success');
+                    this.selectedThumbnails.clear();
+                    this.loadThumbnails();
+                    
+                    const uploadButton = document.getElementById('uploadSelectedThumbnails');
+                    uploadButton.disabled = false;
+                    uploadButton.innerHTML = '<i class="fas fa-upload"></i> Upload Selected Thumbnails';
+                } else if (data.status === 'error') {
+                    clearInterval(progressInterval);
+                    this.showToast(`Upload error: ${data.message}`, 'error');
+                    
+                    const uploadButton = document.getElementById('uploadSelectedThumbnails');
+                    uploadButton.disabled = false;
+                    uploadButton.innerHTML = '<i class="fas fa-upload"></i> Upload Selected Thumbnails';
+                }
+            } catch (error) {
+                console.error('Error checking progress:', error);
+            }
+        }, 1000);
     }
 
     // View toggle functionality
@@ -958,7 +1128,12 @@ class SocialMediaProcessor {
 
     async loadTranscribeData(view = 'db') {
         try {
-            const response = await fetch('/api/videos');
+            const response = await this.rateLimitedFetch('/api/videos');
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
             const data = await response.json();
             
             if (data.success) {
@@ -968,7 +1143,10 @@ class SocialMediaProcessor {
             }
         } catch (error) {
             console.error('Error loading transcription data:', error);
-            this.showToast('Error loading transcription data', 'error');
+            // Don't show toast for connection errors to avoid spam
+            if (error.name !== 'TypeError' || !error.message.includes('Failed to fetch')) {
+                this.showToast('Error loading transcription data', 'error');
+            }
         }
     }
 

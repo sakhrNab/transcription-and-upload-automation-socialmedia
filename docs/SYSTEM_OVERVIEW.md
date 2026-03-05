@@ -14,7 +14,11 @@ OUTPUT: Videos in Google Drive + AIWaverider + Tracking Sheets
 
 ### 1. **Main Processing** (`python main.py`)
 ```
+# With download (--download flag)
 URLs File → Download Videos → Transcribe Audio → Upload to Both Drives → Update Sheets
+
+# Without download (default behavior)
+Existing Videos → Transcribe Audio → Upload to Both Drives → Update Sheets
 ```
 
 ### 2. **Continuous Scanner** (`python continuous_scanner.py`)
@@ -77,8 +81,11 @@ assets/
 ## 🚀 Quick Commands
 
 ```bash
-# Process URLs from file
+# Process existing videos only (default - skips download)
 python main.py --urls-file data/urls.txt
+
+# Process URLs with download included
+python main.py --urls-file data/urls.txt --download
 
 # Start continuous scanner
 python continuous_scanner.py

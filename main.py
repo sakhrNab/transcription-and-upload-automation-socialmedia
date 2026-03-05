@@ -18,7 +18,7 @@ from core.orchestrator import SocialMediaOrchestrator
 from system.new_database import new_db_manager as db_manager
 
 
-async def main(urls: List[str] = None):
+async def main(urls: List[str] = None, skip_download: bool = False):
     """Main function using the new modular orchestrator"""
     print("🚀 Starting Social Media Processor (Modular Architecture)")
     print("=" * 60)
@@ -27,6 +27,8 @@ async def main(urls: List[str] = None):
     print("   • core/processors/ - Individual processors")
     print("   • system/ - Database, config, and utilities")
     print("   • assets/ - Downloaded content")
+    if skip_download:
+        print("⚠️  Download step SKIPPED - processing existing videos only")
     print()
     
     try:
@@ -72,17 +74,21 @@ async def main(urls: List[str] = None):
             if os.path.exists("urls.txt"):
                 with open("urls.txt", 'r', encoding='utf-8') as f:
                     all_urls = [line.strip() for line in f if line.strip()]
-                # Limit to 5 videos max for main processing
-                sample_urls = all_urls[:5]
-                print(f"📝 Loaded {len(all_urls)} URLs from urls.txt, processing first 5")
+                # Process all URLs (no limit for transcription)
+                sample_urls = all_urls
+                print(f"📝 Loaded {len(all_urls)} URLs from urls.txt, processing all {len(all_urls)} videos")
             else:
                 sample_urls = [
                     "https://www.youtube.com/watch?v=dQw4w9WgXcQ",  # Fallback sample URL
                 ]
                 print("📝 Using fallback sample URL")
         
-        print(f"📝 Processing {len(sample_urls)} URLs (max 5 for main processing)...")
-        success = await orchestrator.process_urls(sample_urls)
+        if skip_download:
+            print(f"📝 Processing existing videos (skipping download) with GPU-accelerated parallel transcription...")
+            success = await orchestrator.process_existing_videos()
+        else:
+            print(f"📝 Processing {len(sample_urls)} URLs with GPU-accelerated parallel transcription...")
+            success = await orchestrator.process_urls(sample_urls)
         
         if success:
             print("\n✅ Processing completed successfully!")
@@ -124,6 +130,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Social Media Processor - Modular Architecture')
     parser.add_argument('--urls', nargs='+', help='URLs to process directly')
     parser.add_argument('--urls-file', help='Text file containing URLs (one per line)')
+    parser.add_argument('--download', action='store_true', help='Include download step (default: skip download)')
     parser.add_argument('--test', action='store_true', help='Run test mode')
     args = parser.parse_args()
     
@@ -144,9 +151,9 @@ if __name__ == "__main__":
                 if os.path.exists(args.urls_file):
                     with open(args.urls_file, 'r', encoding='utf-8') as f:
                         all_urls = [line.strip() for line in f if line.strip()]
-                    # Limit to 5 videos max for main processing
-                    urls = all_urls[:5]
-                    print(f"📝 Loaded {len(all_urls)} URLs from {args.urls_file}, processing first 5")
+                    # Process all URLs (no limit for transcription)
+                    urls = all_urls
+                    print(f"📝 Loaded {len(all_urls)} URLs from {args.urls_file}, processing all {len(all_urls)} videos")
                 else:
                     print(f"❌ URLs file not found: {args.urls_file}")
                     sys.exit(1)
@@ -155,15 +162,22 @@ if __name__ == "__main__":
                 if os.path.exists('urls.txt'):
                     with open('urls.txt', 'r', encoding='utf-8') as f:
                         all_urls = [line.strip() for line in f if line.strip()]
-                    # Limit to 5 videos max for main processing
-                    urls = all_urls[:5]
-                    print(f"📝 Loaded {len(all_urls)} URLs from urls.txt, processing first 5")
+                    # Process all URLs (no limit for transcription)
+                    urls = all_urls
+                    print(f"📝 Loaded {len(all_urls)} URLs from urls.txt, processing all {len(all_urls)} videos")
                 else:
                     print("❌ No URLs provided. Use --urls, --urls-file, or create urls.txt")
                     sys.exit(1)
             
+            # Determine if download should be skipped
+            skip_download = not args.download
+            if skip_download:
+                print("⚠️  Download step will be SKIPPED (use --download to include download)")
+            else:
+                print("✅ Download step will be INCLUDED")
+            
             # Run main with URLs
-            asyncio.run(main(urls))
+            asyncio.run(main(urls, skip_download))
         except KeyboardInterrupt:
             print("\n⏹️  Process interrupted by user")
         except Exception as e:

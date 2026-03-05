@@ -41,7 +41,7 @@ mock_data = {
             'size': '15.2 MB',
             'status': 'Downloaded',
             'transcriptionStatus': 'PENDING',
-            'thumbnail': '/placeholder-thumbnail.jpg',
+            'thumbnail': 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+',
             'created_at': '2024-01-15 10:30:00'
         },
         {
@@ -52,7 +52,7 @@ mock_data = {
             'size': '12.8 MB',
             'status': 'Downloaded',
             'transcriptionStatus': 'COMPLETED',
-            'thumbnail': '/placeholder-thumbnail.jpg',
+            'thumbnail': 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+',
             'created_at': '2024-01-15 11:15:00'
         }
     ],
@@ -64,7 +64,7 @@ mock_data = {
             'duration': '3:20',
             'size': '25.6 MB',
             'uploadStatus': 'PENDING',
-            'thumbnail': '/placeholder-thumbnail.jpg',
+            'thumbnail': 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+',
             'path': 'assets/finished_videos/finished_video_1.mp4'
         },
         {
@@ -74,7 +74,7 @@ mock_data = {
             'duration': '2:15',
             'size': '18.3 MB',
             'uploadStatus': 'COMPLETED',
-            'thumbnail': '/placeholder-thumbnail.jpg',
+            'thumbnail': 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+',
             'path': 'assets/finished_videos/finished_video_2.mp4'
         }
     ]
@@ -144,7 +144,7 @@ class MockAPI:
                         'size': self.format_file_size(stat.st_size),
                         'status': 'Ready for Transcription',
                         'transcriptionStatus': 'PENDING',
-                        'thumbnail': f'/thumbnails/{video_file.stem}.webp' if thumbnail_exists else '/placeholder-thumbnail.jpg',
+                        'thumbnail': f'/thumbnails/{video_file.stem}.webp' if thumbnail_exists else 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+',
                         'created_at': datetime.fromtimestamp(stat.st_ctime).strftime('%Y-%m-%d %H:%M:%S')
                     })
                 except Exception as e:
@@ -187,7 +187,7 @@ class MockAPI:
                         'duration': 'Unknown',
                         'size': self.format_file_size(stat.st_size),
                         'uploadStatus': 'PENDING',
-                        'thumbnail': f'/thumbnails/{video_file.stem}.webp' if thumbnail_exists else '/placeholder-thumbnail.jpg',
+                        'thumbnail': f'/thumbnails/{video_file.stem}.webp' if thumbnail_exists else 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+',
                         'path': str(video_file),
                         'thumbnailPath': f"../assets/downloads/thumbnails/{video_file.stem}.webp" if thumbnail_exists else None
                     })
@@ -440,12 +440,13 @@ def get_thumbnail(filename):
         if thumbnail_path.exists():
             return send_from_directory(str(thumbnails_dir), filename)
         else:
-            # Return placeholder if thumbnail doesn't exist
-            placeholder_path = Path("placeholder-thumbnail.jpg")
-            if placeholder_path.exists():
-                return send_from_directory(".", "placeholder-thumbnail.jpg")
-            else:
-                return jsonify({"error": "Thumbnail not found"}), 404
+            # Return SVG data URI instead of serving a file
+            svg_data = '''<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">
+                <rect width="100" height="100" fill="#f0f0f0"/>
+                <text x="50" y="50" font-family="Arial" font-size="12" fill="#666" text-anchor="middle" dy=".3em">No Image</text>
+            </svg>'''
+            from flask import Response
+            return Response(svg_data, mimetype='image/svg+xml')
     except Exception as e:
         logger.error(f"Error serving thumbnail {filename}: {e}")
         return jsonify({"error": "Thumbnail not found"}), 404

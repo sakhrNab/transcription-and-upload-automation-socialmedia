@@ -249,11 +249,17 @@ python test_scanner.py
 **Purpose:** Complete video processing pipeline (download → transcribe → upload → update sheets).
 
 ```bash
-# Basic usage - processes URLs from urls.txt
+# Basic usage - processes existing videos only (SKIPS download)
 python main.py
 
-# Process specific URLs
-python main.py "https://youtube.com/watch?v=abc123"
+# Process with download included
+python main.py --download
+
+# Process specific URLs with download
+python main.py --urls "https://youtube.com/watch?v=abc123" --download
+
+# Process URLs from file with download
+python main.py --urls-file data/urls.txt --download
 
 # Limited to 5 videos max (as configured)
 ```

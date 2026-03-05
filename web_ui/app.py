@@ -136,7 +136,7 @@ class WebAPI:
         """Get thumbnail path or return placeholder"""
         if thumbnail_path and Path(thumbnail_path).exists():
             return f"/thumbnails/{Path(thumbnail_path).name}"
-        return "/placeholder-thumbnail.jpg"
+        return "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIiBmaWxsPSIjNjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iLjNlbSI+Tm8gSW1hZ2U8L3RleHQ+PC9zdmc+"
     
     async def start_download_process(self, urls):
         """Start download process for selected URLs"""
