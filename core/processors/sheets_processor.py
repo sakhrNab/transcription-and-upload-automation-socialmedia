@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 from system.config import settings
 from system.error_recovery import retry_async, RetryConfig, GOOGLE_API_RETRY_CONFIG, CircuitBreaker
 
@@ -78,7 +78,8 @@ class SheetsProcessor(BaseProcessor):
             'upload_status_tiktok_aiwaverider9',
             'upload_status_thumbnail',
             'thumbnail_image',
-            'transcription_status'
+            'transcription_status',
+            'transcript'
         ]
     
     async def initialize(self) -> bool:
@@ -274,7 +275,8 @@ class SheetsProcessor(BaseProcessor):
                     'upload_status_tiktok_aiwaverider9': self.STATUS_PENDING,
                     'upload_status_thumbnail': self.STATUS_UPLOADED if matching_thumbnail and matching_thumbnail.get('drive_id') else self.STATUS_PENDING,
                     'thumbnail_image': '',  # Will be populated after image upload
-                    'transcription_status': video.get('transcription_status', 'PENDING')
+                    'transcription_status': video.get('transcription_status', 'PENDING'),
+                    'transcript': video.get('transcription_text', '')
                 }
                 content_list.append(content_info)
             
@@ -431,7 +433,9 @@ class SheetsProcessor(BaseProcessor):
                     break
             
             if not row_number:
-                self.log_step(f"Entry not found for {filename}, will add as new")
+                self.log_step(f"Entry not found for {filename}, adding as new")
+                # Add as new entry
+                await self._add_new_entries([content_info])
                 return
             
             # Prepare row data
@@ -443,7 +447,7 @@ class SheetsProcessor(BaseProcessor):
                 row_data.append(value)
             
             # Update the row
-            range_name = f'{self.master_sheet_name}!A{row_number}:S{row_number}'
+            range_name = f'{self.master_sheet_name}!A{row_number}:T{row_number}'
             self.service.spreadsheets().values().update(
                 spreadsheetId=self.master_sheet_id,
                 range=range_name,
@@ -497,6 +501,53 @@ class SheetsProcessor(BaseProcessor):
             
         except Exception as e:
             self.log_error(f"Error adding new entries to sheet", e)
+    
+    async def update_sheets_after_download(self, video_index: int) -> bool:
+        """Update sheets after download-only processing"""
+        try:
+            self.log_step(f"Updating sheets for video {video_index}")
+            
+            # Get video data from database
+            video_data = await db_manager.get_video_transcript_by_index(video_index)
+            if not video_data:
+                self.log_error(f"Video data not found for index {video_index}")
+                return False
+            
+            # Prepare content info for sheets
+            content_info = {
+                'filename': video_data.get('filename', ''),
+                'title': video_data.get('title', ''),
+                'description': video_data.get('description', ''),
+                'username': video_data.get('username', ''),
+                'platform': video_data.get('platform', ''),
+                'duration': video_data.get('duration', 0),
+                'view_count': video_data.get('view_count', 0),
+                'like_count': video_data.get('like_count', 0),
+                'comment_count': video_data.get('comment_count', 0),
+                'upload_date': video_data.get('upload_date', ''),
+                'video_path': video_data.get('file_path', ''),
+                'thumbnail_path': video_data.get('thumbnail_file_path', ''),
+                'transcript_path': '',  # Empty for download-only
+                'transcript': '',  # Empty for download-only
+                'word_count': 0,  # Empty for download-only
+                'source_url': video_data.get('webpage_url', ''),
+                'status': 'Downloaded',  # Status for download-only
+                'processing_time': 0,  # Empty for download-only
+                'notes': 'Downloaded only - transcription pending',
+                'error_details': ''
+            }
+            
+            # Update the sheet
+            await self._update_single_entry(content_info)
+            
+            self.log_step(f"Successfully updated sheets for video {video_index}")
+            self.updated_count += 1
+            return True
+            
+        except Exception as e:
+            self.log_error(f"Error updating sheets for video {video_index}", e)
+            self.failed_count += 1
+            return False
     
     async def _save_tracking_data_locally(self, content_list: List[Dict]) -> None:
         """Save tracking data locally as backup"""
@@ -717,7 +768,7 @@ class SheetsProcessor(BaseProcessor):
             # Check if first row has headers
             result = self.service.spreadsheets().values().get(
                 spreadsheetId=self.master_sheet_id,
-                range=f'{self.master_sheet_name}!A1:S1'
+                range=f'{self.master_sheet_name}!A1:T1'
             ).execute()
             
             values = result.get('values', [])
@@ -734,38 +785,92 @@ class SheetsProcessor(BaseProcessor):
                 ).execute()
                 
                 # Apply formatting to header row
-                requests = [{
-                    'repeatCell': {
-                        'range': {
-                            'sheetId': 0,
-                            'startRowIndex': 0,
-                            'endRowIndex': 1
-                        },
-                        'cell': {
-                            'userEnteredFormat': {
-                                'backgroundColor': {
-                                    'red': 0.8,
-                                    'green': 0.8,
-                                    'blue': 0.8
-                                },
-                                'textFormat': {
-                                    'bold': True
+                try:
+                    requests = [{
+                        'repeatCell': {
+                            'range': {
+                                'sheetId': 0,
+                                'startRowIndex': 0,
+                                'endRowIndex': 1,
+                                'startColumnIndex': 0,
+                                'endColumnIndex': len(self.SHEET_COLUMNS)
+                            },
+                            'cell': {
+                                'userEnteredFormat': {
+                                    'backgroundColor': {
+                                        'red': 0.8,
+                                        'green': 0.8,
+                                        'blue': 0.8
+                                    },
+                                    'textFormat': {
+                                        'bold': True
+                                    }
                                 }
-                            }
-                        },
-                        'fields': 'userEnteredFormat(backgroundColor,textFormat)'
-                    }
-                }]
-                self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=self.master_sheet_id,
-                    body={'requests': requests}
-                ).execute()
-                self.log_step("Headers added and formatted successfully")
+                            },
+                            'fields': 'userEnteredFormat(backgroundColor,textFormat)'
+                        }
+                    }]
+                    self.service.spreadsheets().batchUpdate(
+                        spreadsheetId=self.master_sheet_id,
+                        body={'requests': requests}
+                    ).execute()
+                    self.log_step("Headers added and formatted successfully")
+                except Exception as format_error:
+                    self.log_step(f"Header formatting skipped (non-critical): {str(format_error)}")
             else:
                 self.log_step("Headers already exist in sheet")
                 
         except Exception as e:
             self.log_error(f"Error ensuring headers exist: {str(e)}")
+    
+    async def sync_transcripts_to_master_sheet(self) -> bool:
+        """Sync existing transcripts from transcripts sheet to master sheet"""
+        try:
+            self.log_step("Starting transcript synchronization to master sheet")
+            
+            if not self.service:
+                self.log_error("Google Sheets service not initialized")
+                return False
+            
+            # Get all videos from database with transcripts
+            videos_with_transcripts = await db_manager.get_all_videos_with_transcripts()
+            
+            if not videos_with_transcripts:
+                self.log_step("No videos with transcripts found in database")
+                return True
+            
+            self.log_step(f"Found {len(videos_with_transcripts)} videos with transcripts to sync")
+            
+            # First, ensure all videos are in the master sheet
+            for video in videos_with_transcripts:
+                filename = video.get('filename', '')
+                transcript = video.get('transcription_text', '')
+                
+                if not filename or not transcript:
+                    continue
+                
+                # Prepare video data for master sheet
+                video_data = {
+                    'drive_id': video.get('drive_id', ''),
+                    'filename': filename,
+                    'video_name': video.get('smart_name', filename),
+                    'thumbnail_name': video.get('thumbnail_path', '').split('/')[-1] if video.get('thumbnail_path') else '',
+                    'file_path_drive': f"https://drive.google.com/file/d/{video.get('drive_id', '')}/view" if video.get('drive_id') else '',
+                    'upload_time': video.get('updated_at', ''),
+                    'transcription_status': video.get('transcription_status', 'PENDING'),
+                    'transcript': transcript
+                }
+                
+                # Add/update video in master sheet
+                await self._update_single_entry(video_data)
+                self.log_step(f"Added/updated video {filename} with transcript in master sheet")
+            
+            self.log_step("Transcript synchronization completed successfully")
+            return True
+            
+        except Exception as e:
+            self.log_error(f"Error syncing transcripts to master sheet: {str(e)}")
+            return False
     
     async def cleanup(self) -> None:
         """Cleanup sheets processor resources"""

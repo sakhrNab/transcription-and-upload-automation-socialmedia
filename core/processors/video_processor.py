@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 from system.config import settings
 
 # Core libraries
@@ -29,6 +29,7 @@ import whisper
 import requests
 import torch
 import gc
+import psutil
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -49,17 +50,25 @@ class VideoProcessor(BaseProcessor):
         self.thumbnails_dir = "assets/downloads/thumbnails"
         self.transcripts_dir = "assets/downloads/transcripts"
         
-        # Processing configuration
-        self.whisper_model = os.getenv("WHISPER_MODEL", "base")
-        self.max_audio_duration = int(os.getenv("MAX_AUDIO_DURATION", "1800"))
-        self.chunk_duration = int(os.getenv("CHUNK_DURATION", "30"))
-        self.keep_audio_files = os.getenv("KEEP_AUDIO_FILES", "true").lower() == "true"
+        # LinkedIn-specific subdirectories
+        self.linkedin_video_dir = "assets/downloads/videos/linkedin"
+        self.linkedin_thumbnails_dir = "assets/downloads/thumbnails/linkedin"
+        self.linkedin_transcripts_dir = "assets/downloads/transcripts/linkedin"
+        
+        # Processing configuration from settings
+        self.whisper_model = settings.whisper_model
+        self.max_audio_duration = settings.max_audio_duration
+        self.chunk_duration = settings.chunk_duration
+        self.keep_audio_files = settings.keep_audio_files
         
         # OpenAI client
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY not set. Please add it to your .env file.")
         self.openai_client = OpenAI(api_key=api_key)
+        
+        # Parallel processing configuration
+        self.max_concurrent_videos = settings.max_concurrent_videos  # 0 = auto-detect
     
     async def initialize(self) -> bool:
         """Initialize video processor"""
@@ -80,6 +89,11 @@ class VideoProcessor(BaseProcessor):
             os.makedirs(self.thumbnails_dir, exist_ok=True)
             os.makedirs(self.transcripts_dir, exist_ok=True)
             
+            # Create LinkedIn-specific subdirectories
+            os.makedirs(self.linkedin_video_dir, exist_ok=True)
+            os.makedirs(self.linkedin_thumbnails_dir, exist_ok=True)
+            os.makedirs(self.linkedin_transcripts_dir, exist_ok=True)
+            
             self.initialized = True
             self.status = "ready"
             self.log_step("Video processor initialized successfully")
@@ -94,39 +108,88 @@ class VideoProcessor(BaseProcessor):
         return await self.process_urls(urls)
     
     async def process_urls(self, urls: List[str]) -> bool:
-        """Process a list of URLs for video download and transcription"""
+        """Process a list of URLs for video download and transcription with parallel processing"""
         try:
             self.log_step(f"Processing {len(urls)} URLs")
             self.status = "processing"
             
-            # Load existing transcription state
-            transcription_state = await self._load_transcription_state()
+            # Load existing videos from database to check for already downloaded videos
+            existing_videos = await db_manager.get_all_videos()
+            existing_urls = {video.get('url', '') for video in existing_videos if video.get('url')}
+            existing_video_ids = {video.get('video_id', '') for video in existing_videos if video.get('video_id')}
             
-            # Filter out already processed URLs
+            self.log_step(f"Found {len(existing_videos)} existing videos in database")
+            self.log_step(f"Existing URLs: {len(existing_urls)}")
+            self.log_step(f"Existing video IDs: {len(existing_video_ids)}")
+            
+            # Filter out already processed URLs (by URL or video ID)
             new_urls = []
+            skipped_count = 0
+            
             for url in urls:
                 video_id = self._extract_video_id(url)
-                if video_id and transcription_state.get(video_id, {}).get('status') != 'completed':
-                    new_urls.append(url)
+                
+                # Check if URL or video ID already exists in database
+                if url in existing_urls:
+                    self.log_step(f"Skipping already processed video by URL: {url}")
+                    skipped_count += 1
+                    continue
+                elif video_id and video_id in existing_video_ids:
+                    self.log_step(f"Skipping already processed video by ID: {video_id}")
+                    skipped_count += 1
+                    continue
+                    
+                new_urls.append(url)
             
             if not new_urls:
-                self.log_step("No new URLs to process - all have been transcribed")
+                self.log_step(f"No new URLs to process - {skipped_count} already processed, {len(urls)} total")
                 return True
             
-            # Process each URL
-            for i, url in enumerate(new_urls, 1):
-                try:
-                    success = await self._process_single_video(url, i)
-                    if success:
-                        self.processed_count += 1
-                    else:
+            self.log_step(f"Found {len(new_urls)} new URLs to process ({skipped_count} already processed)")
+            
+            # Determine optimal concurrency for parallel processing
+            optimal_concurrency = self._get_optimal_concurrency()
+            self.log_step(f"Using parallel processing with {optimal_concurrency} concurrent videos")
+            
+            # Process URLs in parallel with controlled concurrency
+            semaphore = asyncio.Semaphore(optimal_concurrency)
+            consecutive_download_failures = [0]  # Only track download failures for retry
+            max_consecutive_download_failures = 3  # Stop after 3 consecutive download failures
+            
+            async def process_with_semaphore(url, index):
+                async with semaphore:
+                    try:
+                        self.log_step(f"Starting parallel processing for video {index}")
+                        success = await self._process_single_video_with_download_retry(url, index, consecutive_download_failures, max_consecutive_download_failures)
+                        if success:
+                            self.processed_count += 1
+                        else:
+                            self.failed_count += 1
+                        return success
+                    except Exception as e:
+                        self.log_error(f"Error processing video {index}: {str(e)}")
                         self.failed_count += 1
-                except Exception as e:
-                    self.log_error(f"Error processing URL {url}", e)
+                        # Only count as download failure if it's a download-related error
+                        if "download" in str(e).lower() or "extract" in str(e).lower():
+                            consecutive_download_failures[0] += 1
+                        return False
+            
+            # Create tasks for parallel processing
+            tasks = [process_with_semaphore(url, i+1) for i, url in enumerate(new_urls)]
+            
+            # Execute all tasks in parallel
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    self.log_error(f"Task {i+1} failed with exception: {str(result)}")
+                    self.failed_count += 1
+                elif not result:
                     self.failed_count += 1
             
             self.status = "completed"
-            self.log_step(f"Video processing completed: {self.processed_count} successful, {self.failed_count} failed")
+            self.log_step(f"Parallel video processing completed: {self.processed_count} successful, {self.failed_count} failed")
             return self.failed_count == 0
             
         except Exception as e:
@@ -134,6 +197,280 @@ class VideoProcessor(BaseProcessor):
             self.status = "error"
             return False
     
+    async def process_existing_videos(self) -> bool:
+        """Process existing videos from database for transcription (skip download)"""
+        try:
+            self.log_step("Processing existing videos for transcription (skipping download)")
+            self.status = "processing"
+            
+            # Get all videos that need transcription
+            existing_videos = await db_manager.get_all_videos()
+            videos_to_transcribe = []
+            
+            for video in existing_videos:
+                video_id = video.get('video_id', '')
+                transcription_status = video.get('transcription_status', 'PENDING')
+                file_path = video.get('file_path', '')
+                
+                # Only process videos that are PENDING and have a valid file path
+                if transcription_status == 'PENDING' and file_path and os.path.exists(file_path):
+                    videos_to_transcribe.append(video)
+                elif transcription_status == 'PENDING' and not file_path:
+                    self.log_step(f"Video {video_id} has no file path, skipping")
+                elif transcription_status != 'PENDING':
+                    self.log_step(f"Video {video_id} already transcribed (status: {transcription_status}), skipping")
+                elif not os.path.exists(file_path):
+                    self.log_step(f"Video {video_id} file not found at {file_path}, skipping")
+            
+            if not videos_to_transcribe:
+                self.log_step("No videos found that need transcription")
+                self.status = "completed"
+                return True
+            
+            self.log_step(f"Found {len(videos_to_transcribe)} videos that need transcription")
+            
+            # Determine optimal concurrency for parallel processing
+            optimal_concurrency = self._get_optimal_concurrency()
+            self.log_step(f"Using parallel processing with {optimal_concurrency} concurrent videos")
+            
+            # Process videos in parallel with controlled concurrency
+            semaphore = asyncio.Semaphore(optimal_concurrency)
+            
+            async def process_with_semaphore(video_data, index):
+                async with semaphore:
+                    try:
+                        self.log_step(f"Starting transcription for video {index + 1}/{len(videos_to_transcribe)}")
+                        success = await self._process_existing_video(video_data, index)
+                        if success:
+                            self.processed_count += 1
+                        else:
+                            self.failed_count += 1
+                        return success
+                    except Exception as e:
+                        self.log_error(f"Error processing video {index + 1}: {str(e)}")
+                        self.failed_count += 1
+                        return False
+            
+            # Create tasks for parallel processing
+            tasks = [process_with_semaphore(video, i) for i, video in enumerate(videos_to_transcribe)]
+            
+            # Execute all tasks in parallel
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    self.log_error(f"Task {i+1} failed with exception: {str(result)}")
+                    self.failed_count += 1
+                elif not result:
+                    self.failed_count += 1
+            
+            self.status = "completed"
+            self.log_step(f"Existing videos processing completed: {self.processed_count} successful, {self.failed_count} failed")
+            return self.failed_count == 0
+            
+        except Exception as e:
+            self.log_error("Error in process_existing_videos", e)
+            self.status = "error"
+            return False
+    
+    async def _process_existing_video(self, video_data: dict, index: int) -> bool:
+        """Process a single existing video for transcription"""
+        try:
+            video_id = video_data.get('video_id', '')
+            file_path = video_data.get('file_path', '')
+            title = video_data.get('title', '')
+            
+            self.log_step(f"Processing existing video {index + 1}: {title}")
+            
+            # Check if file exists
+            if not os.path.exists(file_path):
+                self.log_error(f"Video file not found: {file_path}")
+                return False
+            
+            # Convert to audio
+            audio_path = await self._convert_video_to_audio(file_path, index)
+            if not audio_path:
+                self.log_error(f"Failed to convert video to audio: {file_path}")
+                return False
+            
+            # Transcribe audio
+            transcript = await self._transcribe_audio_with_whisper(audio_path, index)
+            if not transcript:
+                self.log_step(f"No speech detected in video {index + 1}, skipping")
+                return False
+            
+            # Generate smart name
+            generated_name = await self._generate_smart_video_name(
+                title, 
+                video_data.get('description', ''),
+                index
+            )
+            
+            # Save transcript file
+            transcript_path = await self._save_transcript_file(
+                transcript, 
+                generated_name, 
+                video_data, 
+                index,
+                is_linkedin='linkedin.com' in url
+            )
+            
+            # Update database with transcription
+            await self._update_video_transcription(
+                video_id, 
+                transcript, 
+                generated_name, 
+                file_path, 
+                video_data.get('thumbnail_path', ''), 
+                video_data
+            )
+            
+            self.log_step(f"Successfully transcribed video {index + 1}: {generated_name}")
+            return True
+            
+        except Exception as e:
+            self.log_error(f"Error processing existing video {index + 1}: {str(e)}")
+            return False
+    
+    def _get_optimal_concurrency(self) -> int:
+        """Calculate optimal concurrency based on system resources and GPU availability"""
+        if self.max_concurrent_videos > 0:
+            return self.max_concurrent_videos
+        
+        # Auto-detect optimal concurrency
+        import psutil
+        
+        # Base concurrency on CPU cores
+        cpu_cores = psutil.cpu_count(logical=False)  # Physical cores
+        
+        # GPU availability affects optimal concurrency
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+            if gpu_memory >= 8:  # High-end GPU
+                optimal = min(cpu_cores * 2, 6)  # Up to 6 concurrent with high-end GPU
+            elif gpu_memory >= 4:  # Mid-range GPU
+                optimal = min(cpu_cores, 4)  # Up to 4 concurrent with mid-range GPU
+            else:  # Low-end GPU
+                optimal = min(cpu_cores // 2, 2)  # Conservative with low-end GPU
+        else:
+            # CPU-only processing - more conservative
+            optimal = max(1, cpu_cores // 2)
+        
+        # Ensure minimum of 1 and maximum of 8
+        optimal = max(1, min(optimal, 8))
+        
+        self.log_step(f"Auto-detected optimal concurrency: {optimal} (CPU cores: {cpu_cores}, GPU: {torch.cuda.is_available()})")
+        return optimal
+    
+    async def _process_single_video_with_download_retry(self, url: str, index: int, consecutive_download_failures_ref: list, max_consecutive_download_failures: int) -> bool:
+        """Process a single video with retry logic only for download failures"""
+        max_download_retries = 3
+        
+        for attempt in range(max_download_retries):
+            try:
+                if attempt > 0:
+                    self.log_step(f"Download retry attempt {attempt + 1}/{max_download_retries} for video {index}")
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                
+                result = await self._process_single_video_without_transcription_retry(url, index)
+                if result:
+                    consecutive_download_failures_ref[0] = 0  # Reset on success
+                    return True
+                else:
+                    # Check if this was a download failure or transcription failure
+                    # If it's a transcription failure, don't retry and don't count as download failure
+                    self.log_step(f"Video {index} processing completed (may have transcription issues)")
+                    return False  # Don't retry transcription failures
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Only retry if it's a download-related error
+                if "download" in error_msg or "extract" in error_msg or "url" in error_msg:
+                    self.log_error(f"Download attempt {attempt + 1}/{max_download_retries} failed for video {index}: {str(e)}")
+                    consecutive_download_failures_ref[0] += 1
+                    self.log_step(f"Video {index} download failed, consecutive download failures: {consecutive_download_failures_ref[0]}")
+                    
+                    # Check if we should stop after this download failure
+                    if consecutive_download_failures_ref[0] >= max_consecutive_download_failures:
+                        self.log_step(f"Stopping download process after {consecutive_download_failures_ref[0]} consecutive download failures")
+                        return False
+                    
+                    # Continue to next attempt if we haven't reached max retries
+                    if attempt < max_download_retries - 1:
+                        continue
+                    else:
+                        self.log_step(f"Skipping video {index} after {max_download_retries} failed download attempts")
+                        return False
+                else:
+                    # Transcription or other non-download error - don't retry
+                    self.log_error(f"Non-download error for video {index}: {str(e)}")
+                    return False
+        
+        return False
+
+    async def _process_single_video_without_transcription_retry(self, url: str, index: int) -> bool:
+        """Process a single video through the complete pipeline without transcription retry"""
+        start_time = time.time()
+        
+        try:
+            self.log_step(f"Starting complete pipeline for video {index}")
+            
+            # Step 0: Check if already transcribed
+            video_id = self._extract_video_id(url)
+            if video_id:
+                existing = await self._check_existing_transcription(video_id)
+                if existing:
+                    self.log_step(f"Video {video_id} already transcribed, skipping")
+                    return True
+            
+            # Step 1: Download video and extract metadata
+            video_path, metadata, raw_info = await self._download_video_and_metadata(url, index)
+            
+            # Step 2: Download thumbnail
+            thumbnail_path = await self._download_thumbnail(
+                metadata.get('thumbnail_url'), 
+                metadata.get('video_id'), 
+                metadata.get('username'),
+                index,
+                is_linkedin='linkedin.com' in url
+            )
+            
+            # Step 3: Generate smart video name
+            generated_name = await self._generate_smart_video_name(
+                metadata.get('title', ''), 
+                metadata.get('description', ''),
+                index
+            )
+            
+            # Step 4: Convert to audio
+            audio_path = await self._convert_video_to_audio(video_path, index)
+            
+            # Step 5: Transcribe (no retry - if it fails, skip to next video)
+            transcript = await self._transcribe_audio_with_whisper(audio_path, index)
+            
+            # Step 6: Save transcript as separate file
+            if transcript:
+                transcript_path = await self._save_transcript_file(transcript, generated_name, metadata, index, is_linkedin='linkedin.com' in url)
+                
+                # Step 7: Update database with transcription
+                video_id = metadata.get('video_id', '')
+                if video_id:
+                    await self._update_video_transcription(video_id, transcript, generated_name, video_path, thumbnail_path, metadata)
+                
+                self.log_step(f"Complete pipeline successful: {generated_name}")
+                return True
+            else:
+                self.log_step(f"Transcription failed for video {index} (no speech detected) - skipping to next video")
+                return False  # Don't retry transcription failures
+                
+        except Exception as e:
+            self.log_error(f"Error processing video {index}: {str(e)}")
+            raise  # Re-raise the exception so retry logic can catch it
+        finally:
+            processing_time = time.time() - start_time
+            self.log_step(f"Video {index} processing completed in {processing_time:.2f}s")
+
     async def _process_single_video(self, url: str, index: int) -> bool:
         """Process a single video through the complete pipeline"""
         start_time = time.time()
@@ -157,7 +494,8 @@ class VideoProcessor(BaseProcessor):
                 metadata.get('thumbnail_url'), 
                 metadata.get('video_id'), 
                 metadata.get('username'),
-                index
+                index,
+                is_linkedin='linkedin.com' in url
             )
             
             # Step 3: Generate smart video name
@@ -175,7 +513,7 @@ class VideoProcessor(BaseProcessor):
             
             # Step 6: Save transcript as separate file
             if transcript:
-                transcript_path = await self._save_transcript_file(transcript, generated_name, metadata, index)
+                transcript_path = await self._save_transcript_file(transcript, generated_name, metadata, index, is_linkedin='linkedin.com' in url)
                 
                 # Step 7: Update database with transcription
                 video_id = metadata.get('video_id', '')
@@ -190,7 +528,7 @@ class VideoProcessor(BaseProcessor):
                 
         except Exception as e:
             self.log_error(f"Error processing video {index}: {str(e)}")
-            return False
+            raise  # Re-raise the exception so retry logic can catch it
         finally:
             processing_time = time.time() - start_time
             self.log_step(f"Video {index} processing completed in {processing_time:.2f}s")
@@ -202,7 +540,26 @@ class VideoProcessor(BaseProcessor):
         self.log_step(f"Extracting video information for video {index}")
         
         # First, extract info without downloading
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+        info_opts = {
+            'quiet': True,
+            'restrictfilenames': True,  # Remove/replace invalid characters
+            'windowsfilenames': True,   # Ensure Windows compatibility
+        }
+        
+        # Add LinkedIn-specific authentication if it's a LinkedIn URL
+        if 'linkedin.com' in url:
+            # For LinkedIn, try without cookies first (some videos are public)
+            info_opts.update({
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            })
+            self.log_step(f"LinkedIn URL detected - trying without cookies first")
+        else:
+            # For non-LinkedIn URLs, use standard user agent
+            info_opts.update({
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            })
+        
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
             try:
                 info = ydl.extract_info(url, download=False)
                 self.log_step(f"Extracted metadata for {info.get('title', 'Unknown')}")
@@ -227,19 +584,37 @@ class VideoProcessor(BaseProcessor):
         
         # Create filename with sequential numbering
         seq_num = self._get_video_number(self.video_output_dir, username)
-        filename_template = os.path.join(self.video_output_dir, f"{seq_num:02d}_{username}_{video_id}.%(ext)s")
+        
+        # For LinkedIn, use a safer template that avoids long titles and LinkedIn subfolder
+        if 'linkedin.com' in url:
+            # Use video ID as primary identifier to avoid long titles
+            filename_template = os.path.join(self.linkedin_video_dir, f"{seq_num:02d}_linkedin_{video_id}.%(ext)s")
+        else:
+            # For other platforms, use the original template
+            filename_template = os.path.join(self.video_output_dir, f"{seq_num:02d}_{username}_{video_id}.%(ext)s")
         
         self.log_step(f"Starting download: {title}")
         
-        # Download configuration
+        # Download configuration with safe filename template
         ydl_opts = {
             'outtmpl': filename_template,
             'format': 'best[ext=mp4]/best',
             'writesubtitles': False,
             'writeautomaticsub': False,
             'ignoreerrors': False,
-            'quiet': True
+            'quiet': True,
+            # Handle long titles by truncating them safely
+            'restrictfilenames': True,  # Remove/replace invalid characters
+            'windowsfilenames': True,   # Ensure Windows compatibility
         }
+        
+        # Add LinkedIn-specific authentication if it's a LinkedIn URL
+        if 'linkedin.com' in url:
+            # For LinkedIn, try without cookies first (some videos are public)
+            ydl_opts.update({
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            })
+            self.log_step(f"LinkedIn URL detected - trying without cookies first")
         
         download_start = time.time()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -294,7 +669,7 @@ class VideoProcessor(BaseProcessor):
             'file_path': file_path
         }
     
-    async def _download_thumbnail(self, thumbnail_url: str, video_id: str, username: str, index: int) -> Optional[str]:
+    async def _download_thumbnail(self, thumbnail_url: str, video_id: str, username: str, index: int, is_linkedin: bool = False) -> Optional[str]:
         """Download thumbnail image to thumbnails directory"""
         if not thumbnail_url:
             self.log_step(f"No thumbnail URL available for video {index}")
@@ -308,8 +683,11 @@ class VideoProcessor(BaseProcessor):
             })
             
             if response.status_code == 200:
+                # Choose directory based on platform
+                thumbnails_dir = self.linkedin_thumbnails_dir if is_linkedin else self.thumbnails_dir
+                
                 # Get sequential number for the username
-                seq_num = self._get_video_number(self.thumbnails_dir, username)
+                seq_num = self._get_video_number(thumbnails_dir, username)
                 
                 # Determine file extension from content type
                 content_type = response.headers.get('content-type', '')
@@ -322,9 +700,15 @@ class VideoProcessor(BaseProcessor):
                 else:
                     ext = '.jpg'
                 
-                filename = f"{seq_num:02d}_{username}_{video_id}{ext}"
-                filepath = os.path.join(self.thumbnails_dir, filename)
+                # Use appropriate filename format
+                if is_linkedin:
+                    filename = f"{seq_num:02d}_linkedin_{video_id}{ext}"
+                else:
+                    filename = f"{seq_num:02d}_{username}_{video_id}{ext}"
+                filepath = os.path.join(thumbnails_dir, filename)
                 filepath = self._get_unique_filename(filepath)
+                # Normalize path separators for consistency
+                filepath = os.path.normpath(filepath)
                 
                 with open(filepath, 'wb') as f:
                     f.write(response.content)
@@ -368,23 +752,28 @@ class VideoProcessor(BaseProcessor):
             raise Exception(f"Audio conversion failed: {str(e)}")
     
     async def _transcribe_audio_with_whisper(self, audio_file: str, index: int) -> str:
-        """Transcribe audio using Whisper with comprehensive logging and GPU optimization"""
+        """Transcribe audio using Whisper with comprehensive logging and GPU optimization for parallel processing"""
         self.log_step(f"Starting transcription with {self.whisper_model} model for video {index}")
         
         try:
             # Check GPU availability and set device
             device = "cuda" if torch.cuda.is_available() else "cpu"
             if torch.cuda.is_available():
+                # Clear GPU memory before transcription
                 torch.cuda.empty_cache()
-                self.log_step(f"GPU detected: {torch.cuda.get_device_name(0)} (CUDA {torch.version.cuda})")
+                # Get GPU memory info for parallel processing optimization
+                gpu_memory_allocated = torch.cuda.memory_allocated() / (1024**3)
+                gpu_memory_reserved = torch.cuda.memory_reserved() / (1024**3)
+                self.log_step(f"GPU detected: {torch.cuda.get_device_name(0)} (CUDA {torch.version.cuda}) - Memory: {gpu_memory_allocated:.2f}GB allocated, {gpu_memory_reserved:.2f}GB reserved")
             else:
                 self.log_step("No GPU detected, using CPU")
             
             transcription_start = time.time()
             
             # Load model with explicit device specification
+            # For parallel processing, we load the model fresh each time to avoid conflicts
             model = whisper.load_model(self.whisper_model, device=device)
-            self.log_step(f"Loaded {self.whisper_model} model on {device.upper()}")
+            self.log_step(f"Loaded {self.whisper_model} model on {device.upper()} for video {index}")
             
             # Check audio duration
             audio_duration = self._get_audio_duration(audio_file)
@@ -517,10 +906,12 @@ Return only the name, no explanation. Make it suitable for a filename."""
             self.log_step(f"Using fallback name: {fallback_name}")
             return fallback_name
     
-    async def _save_transcript_file(self, transcript: str, generated_name: str, metadata: dict, index: int) -> str:
+    async def _save_transcript_file(self, transcript: str, generated_name: str, metadata: dict, index: int, is_linkedin: bool = False) -> str:
         """Save transcript as separate text file with metadata header"""
         transcript_filename = f"{generated_name}.txt"
-        transcript_path = os.path.join(self.transcripts_dir, transcript_filename)
+        # Choose directory based on platform
+        transcripts_dir = self.linkedin_transcripts_dir if is_linkedin else self.transcripts_dir
+        transcript_path = os.path.join(transcripts_dir, transcript_filename)
         transcript_path = self._get_unique_filename(transcript_path)
         
         # Create transcript file with metadata header
@@ -608,6 +999,17 @@ TRANSCRIPT:
             elif 'tiktok.com' in url:
                 if '/video/' in url:
                     return url.split('/video/')[-1].split('?')[0]
+            
+            # LinkedIn
+            elif 'linkedin.com' in url:
+                if '/posts/' in url:
+                    # Extract post ID from LinkedIn URL
+                    post_id = url.split('/posts/')[-1].split('?')[0]
+                    return f"linkedin_{post_id}"
+                elif '/activity/' in url:
+                    # Extract activity ID from LinkedIn URL
+                    activity_id = url.split('/activity/')[-1].split('?')[0]
+                    return f"linkedin_{activity_id}"
             
             # Generic fallback - use last part of URL
             return url.split('/')[-1].split('?')[0]
@@ -712,6 +1114,90 @@ TRANSCRIPT:
         except Exception as e:
             self.log_error(f"Error updating video transcription: {str(e)}")
     
+    async def download_video_only(self, url: str, index: int) -> bool:
+        """Download video and extract metadata only (no transcription)"""
+        try:
+            self.log_step(f"Starting download-only processing for video {index}")
+            
+            # Step 1: Download video and extract metadata
+            video_path, metadata, raw_info = await self._download_video_and_metadata(url, index)
+            
+            # Step 2: Download thumbnail
+            thumbnail_path = await self._download_thumbnail(
+                metadata.get('thumbnail_url'), 
+                metadata.get('video_id'), 
+                metadata.get('username'),
+                index,
+                is_linkedin='linkedin.com' in url
+            )
+            
+            # Log thumbnail path for debugging
+            if thumbnail_path:
+                self.log_step(f"Thumbnail downloaded to: {thumbnail_path}")
+            else:
+                self.log_step(f"No thumbnail downloaded for video {index}")
+            
+            # Step 3: Generate smart video name
+            generated_name = await self._generate_smart_video_name(
+                metadata.get('title', ''), 
+                metadata.get('description', ''),
+                index
+            )
+            
+            # Step 4: Save to database (without transcription data)
+            video_data = {
+                'video_id': metadata.get('video_id', ''),
+                'filename': os.path.basename(video_path),
+                'file_path': video_path,
+                'url': url,
+                'title': metadata.get('title', ''),
+                'description': metadata.get('description', ''),
+                'username': metadata.get('username', ''),
+                'uploader_id': metadata.get('uploader_id', ''),
+                'channel_id': metadata.get('channel_id', ''),
+                'channel_url': metadata.get('channel_url', ''),
+                'platform': metadata.get('platform', ''),
+                'duration': metadata.get('duration', 0),
+                'width': metadata.get('width', 0),
+                'height': metadata.get('height', 0),
+                'fps': metadata.get('fps', 0),
+                'format_id': metadata.get('format_id', ''),
+                'view_count': metadata.get('view_count', 0),
+                'like_count': metadata.get('like_count', 0),
+                'comment_count': metadata.get('comment_count', 0),
+                'upload_date': metadata.get('upload_date', ''),
+                'thumbnail_url': metadata.get('thumbnail_url', ''),
+                'webpage_url': metadata.get('webpage_url', ''),
+                'extractor': metadata.get('extractor', ''),
+                'transcription_text': '',  # Empty for download-only
+                'transcription_status': 'PENDING',  # Will be processed later
+                'smart_name': generated_name,
+                'thumbnail_file_path': thumbnail_path if thumbnail_path else '',
+                'video_file_size_mb': metadata.get('file_size_mb', 0),
+                'transcript_word_count': 0,  # Will be filled during transcription
+                'processing_time_seconds': 0,  # Will be filled during transcription
+                'notes': 'Downloaded only - transcription pending',
+                'error_details': ''
+            }
+            
+            # Debug: Log the thumbnail path being saved
+            self.log_step(f"Saving thumbnail path to database: {video_data.get('thumbnail_file_path', 'EMPTY')}")
+            
+            # Save to database
+            success = await db_manager.upsert_video_transcript(video_data)
+            if success:
+                self.log_step(f"Video {index} data saved to database")
+                self.processed_count += 1
+                return True
+            else:
+                self.log_error(f"Failed to save video {index} data to database")
+                return False
+                
+        except Exception as e:
+            self.log_error(f"Error in download-only processing for video {index}: {str(e)}")
+            self.failed_count += 1
+            return False
+
     async def cleanup(self) -> None:
         """Cleanup video processor resources"""
         try:

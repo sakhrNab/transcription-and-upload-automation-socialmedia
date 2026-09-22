@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass
 from enum import Enum
 from .config import settings
-from .database import db_manager
+from .new_database import new_db_manager as db_manager
 from .error_recovery import retry_async, RetryConfig, AIWAVERIDER_RETRY_CONFIG, GOOGLE_API_RETRY_CONFIG
 from .health_metrics import metrics_collector
 from .processor_logger import processor_logger as logger

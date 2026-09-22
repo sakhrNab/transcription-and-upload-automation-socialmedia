@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     master_sheet_id: str = Field(default="1HNKPIhq1kB1xoS52cM2U7KOdiJS8pqiQ7j_fbTQOUPI", description="Google Sheets ID for master tracking")
     master_sheet_name: str = Field(default="socialmedia_tracker", description="Google Sheets name")
     
+    
+    # Video Transcripts Sheet Configuration
+    transcripts_sheet_id: str = Field(default="1vDHi5qGBrerPZ2LvMFY1IkyWoiCIWOD2_rW6u7_NQ1s", description="Google Sheets ID for video transcripts (auto-created if empty)")
+    transcripts_sheet_name: str = Field(default="video_transcripts", description="Google Sheets name for video transcripts")
+    
     # AIWaverider Configuration
     aiwaverider_token: str = Field(default="", description="AIWaverider API token")
     aiwaverider_upload_url: str = Field(
@@ -31,9 +36,16 @@ class Settings(BaseSettings):
     
     # Performance Configuration
     max_concurrent_uploads: int = Field(default=3, description="Maximum concurrent uploads")
+    max_concurrent_videos: int = Field(default=0, description="Maximum concurrent video processing (0 = auto-detect)")
     cache_duration_hours: int = Field(default=1, description="Cache duration in hours")
     chunk_size_mb: int = Field(default=5, description="Chunk size for large file uploads in MB")
     upload_timeout_seconds: int = Field(default=300, description="Upload timeout in seconds")
+    
+    # Video Processing Configuration
+    whisper_model: str = Field(default="base", description="Whisper model size")
+    max_audio_duration: int = Field(default=1800, description="Maximum audio duration in seconds")
+    chunk_duration: int = Field(default=30, description="Audio chunk duration in seconds")
+    keep_audio_files: bool = Field(default=True, description="Keep audio files after processing")
     
     # Database Configuration
     database_url: str = Field(default="sqlite:///social_media.db", description="Database URL")

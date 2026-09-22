@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core.processors.base_processor import BaseProcessor
-from system.database import db_manager
+from system.new_database import new_db_manager as db_manager
 from system.config import settings
 from system.error_recovery import retry_async, RetryConfig, AIWAVERIDER_RETRY_CONFIG, CircuitBreaker
 
@@ -113,12 +113,26 @@ class AIWaveriderProcessor(BaseProcessor):
             self.log_step("Starting AIWaverider Drive uploads")
             self.status = "processing"
             
-            # Get videos and thumbnails from database
-            videos = await db_manager.get_videos_by_status('COMPLETED')
-            thumbnails = await db_manager.get_thumbnails_by_status('COMPLETED')
+            # Find all .mp4 files in assets/finished_videos and its subfolders
+            finished_videos_dir = Path("assets/finished_videos")
+            videos = []
+            
+            if finished_videos_dir.exists():
+                for mp4_file in finished_videos_dir.rglob("*.mp4"):
+                    file_path = str(mp4_file)
+                    filename = mp4_file.name
+                    videos.append({
+                        'filename': filename,
+                        'file_path': file_path,
+                        'transcription_status': 'COMPLETED'  # Assume completed since it's in finished_videos
+                    })
+            
+            # Get thumbnails from database
+            thumbnails = await db_manager.get_all_thumbnails()
+            thumbnails = [t for t in thumbnails if t.get('video_filename')]  # Thumbnails with video association
             
             if not videos and not thumbnails:
-                self.log_step("No completed videos or thumbnails found in database")
+                self.log_step("No completed videos or thumbnails found")
                 return True
             
             # Get existing files from AIWaverider Drive to avoid duplicates
@@ -135,7 +149,13 @@ class AIWaveriderProcessor(BaseProcessor):
                 filename = video.get('filename', '')
                 file_path = video.get('file_path', '')
                 
-                if filename not in existing_videos and file_path and os.path.exists(file_path):
+                # Check if already uploaded to AIWaverider by looking in database
+                existing_videos_db = await db_manager.get_all_videos()
+                video_data = next((v for v in existing_videos_db if v.get('file_path') == file_path), None)
+                
+                if (filename not in existing_videos and 
+                    file_path and os.path.exists(file_path) and
+                    (not video_data or video_data.get('aiwaverider_status') != 'COMPLETED')):
                     upload_tasks.append(('video', file_path, video))
             
             # Add thumbnail upload tasks
@@ -157,11 +177,22 @@ class AIWaveriderProcessor(BaseProcessor):
             
             async def upload_with_semaphore(file_type: str, file_path: str, file_data: Dict):
                 async with semaphore:
-                    self.log_step(f"Uploading {file_type}: {os.path.basename(file_path)}")
+                    filename = os.path.basename(file_path)
+                    self.log_step(f"Starting AIWaverider {file_type} upload: {filename}")
                     if file_type == 'video':
-                        return await self._upload_video_to_aiwaverider(file_path)
+                        result = await self._upload_video_to_aiwaverider(file_path)
+                        if result:
+                            self.log_step(f"✅ AIWaverider video upload successful: {filename}")
+                        else:
+                            self.log_error(f"❌ AIWaverider video upload failed: {filename}")
+                        return result
                     else:
-                        return await self._upload_thumbnail_to_aiwaverider(file_path)
+                        result = await self._upload_thumbnail_to_aiwaverider(file_path)
+                        if result:
+                            self.log_step(f"✅ AIWaverider thumbnail upload successful: {filename}")
+                        else:
+                            self.log_error(f"❌ AIWaverider thumbnail upload failed: {filename}")
+                        return result
             
             # Execute uploads in parallel
             results = await asyncio.gather(
@@ -178,11 +209,21 @@ class AIWaveriderProcessor(BaseProcessor):
                     self.failed_count += 1
                 elif result:
                     self.uploaded_count += 1
-                    # Update database status
-                    if file_type == 'video':
-                        await db_manager.update_video_aiwaverider_status(file_data['id'], 'COMPLETED')
-                    else:
-                        await db_manager.update_thumbnail_aiwaverider_status(file_data['id'], 'COMPLETED')
+                    # Update upload_tracking table with AIWaverider upload status
+                    video_id = file_data.get('video_id', '')
+                    if video_id:
+                        await db_manager.upsert_upload_tracking({
+                            'video_id': video_id,
+                            'filename': file_data['filename'],
+                            'file_path': file_path,
+                            'file_type': file_type,
+                            'aiwaverider_id': result.get('id', ''),
+                            'aiwaverider_url': result.get('url', ''),
+                            'aiwaverider_upload_status': 'COMPLETED',
+                            'aiwaverider_upload_date': datetime.now().isoformat(),
+                            'aiwaverider_folder_path': result.get('folder_path', ''),
+                            'upload_attempts': 1
+                        })
                 else:
                     self.failed_count += 1
             
@@ -284,27 +325,101 @@ class AIWaveriderProcessor(BaseProcessor):
             self.log_error(f"Error checking file existence on AIWaverider Drive: {str(e)}")
             return False
     
+    async def _check_database_aiwaverider_duplicate(self, filename: str, file_type: str) -> Dict[str, Any]:
+        """Check if file already exists in database with AIWaverider upload status"""
+        try:
+            # Check upload_tracking table for AIWaverider uploads
+            upload_data = await db_manager.get_upload_tracking_by_filename(filename)
+            if upload_data:
+                aiwaverider_status = upload_data.get('aiwaverider_upload_status', '')
+                if aiwaverider_status == 'COMPLETED':
+                    return {
+                        'exists': True,
+                        'status': f'Already uploaded to AIWaverider Drive ({file_type})'
+                    }
+                elif aiwaverider_status == 'PENDING':
+                    return {
+                        'exists': True,
+                        'status': f'Upload to AIWaverider Drive in progress ({file_type})'
+                    }
+            
+            return {
+                'exists': False,
+                'status': f'No AIWaverider upload found for {file_type}'
+            }
+            
+        except Exception as e:
+            self.log_error(f"Error checking AIWaverider database duplicate: {str(e)}")
+            return {
+                'exists': False,
+                'status': f'Database check failed: {str(e)}'
+            }
+    
     async def _upload_video_to_aiwaverider(self, video_path: str) -> bool:
-        """Upload video to AIWaverider Drive with existence checking"""
-        filename = os.path.basename(video_path)
-        
-        # Check if file already exists on AIWaverider Drive
-        if await self._check_file_exists_on_aiwaverider(filename, self.video_folder_path):
-            self.log_step(f"Video {filename} already exists on AIWaverider Drive. Skipping.")
-            return True
-        
-        return await self._upload_to_aiwaverider_drive_async(video_path, self.video_folder_path, "video")
+        """Upload video to AIWaverider Drive with comprehensive duplicate checking"""
+        try:
+            filename = os.path.basename(video_path)
+            
+            # Check if file already exists on AIWaverider Drive
+            self.log_step(f"Checking AIWaverider Drive for video duplicates: {filename}")
+            if await self._check_file_exists_on_aiwaverider(filename, self.video_folder_path):
+                self.log_step(f"SKIP: {filename} - Video already exists on AIWaverider Drive")
+                return True
+            
+            # Check database for existing uploads
+            self.log_step(f"Checking database for AIWaverider video duplicates: {filename}")
+            db_check = await self._check_database_aiwaverider_duplicate(filename, "video")
+            if db_check['exists']:
+                self.log_step(f"SKIP: {filename} - {db_check['status']}")
+                return True
+            
+            # All checks passed, proceed with upload
+            self.log_step(f"UPLOAD: {filename} - No duplicates found, proceeding with AIWaverider upload")
+            success = await self._upload_to_aiwaverider_drive_async(video_path, self.video_folder_path, "video")
+            
+            if success:
+                self.log_step(f"SUCCESS: {filename} uploaded to AIWaverider Drive successfully")
+            else:
+                self.log_error(f"FAILED: {filename} - AIWaverider upload failed")
+            
+            return success
+            
+        except Exception as e:
+            self.log_error(f"ERROR: {filename} - AIWaverider upload error: {str(e)}")
+            return False
     
     async def _upload_thumbnail_to_aiwaverider(self, thumbnail_path: str) -> bool:
-        """Upload thumbnail to AIWaverider Drive with existence checking"""
-        filename = os.path.basename(thumbnail_path)
-        
-        # Check if file already exists on AIWaverider Drive
-        if await self._check_file_exists_on_aiwaverider(filename, self.thumbnail_folder_path):
-            self.log_step(f"Thumbnail {filename} already exists on AIWaverider Drive. Skipping.")
-            return True
-        
-        return await self._upload_to_aiwaverider_drive_async(thumbnail_path, self.thumbnail_folder_path, "thumbnail")
+        """Upload thumbnail to AIWaverider Drive with comprehensive duplicate checking"""
+        try:
+            filename = os.path.basename(thumbnail_path)
+            
+            # Check if file already exists on AIWaverider Drive
+            self.log_step(f"Checking AIWaverider Drive for thumbnail duplicates: {filename}")
+            if await self._check_file_exists_on_aiwaverider(filename, self.thumbnail_folder_path):
+                self.log_step(f"SKIP: {filename} - Thumbnail already exists on AIWaverider Drive")
+                return True
+            
+            # Check database for existing uploads
+            self.log_step(f"Checking database for AIWaverider thumbnail duplicates: {filename}")
+            db_check = await self._check_database_aiwaverider_duplicate(filename, "thumbnail")
+            if db_check['exists']:
+                self.log_step(f"SKIP: {filename} - {db_check['status']}")
+                return True
+            
+            # All checks passed, proceed with upload
+            self.log_step(f"UPLOAD: {filename} - No duplicates found, proceeding with AIWaverider thumbnail upload")
+            success = await self._upload_to_aiwaverider_drive_async(thumbnail_path, self.thumbnail_folder_path, "thumbnail")
+            
+            if success:
+                self.log_step(f"SUCCESS: {filename} thumbnail uploaded to AIWaverider Drive successfully")
+            else:
+                self.log_error(f"FAILED: {filename} - AIWaverider thumbnail upload failed")
+            
+            return success
+            
+        except Exception as e:
+            self.log_error(f"ERROR: {filename} - AIWaverider thumbnail upload error: {str(e)}")
+            return False
     
     @retry_async(AIWAVERIDER_RETRY_CONFIG)
     async def _upload_to_aiwaverider_drive_async(self, file_path: str, folder_path: str, file_type: str) -> bool:
